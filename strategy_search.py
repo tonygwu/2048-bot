@@ -1,6 +1,7 @@
 """Search policy and action selection."""
 
 import math
+from collections import OrderedDict
 
 from strategy_actions import (
     Action,
@@ -11,8 +12,52 @@ from strategy_actions import (
     action_to_tuple,
 )
 from strategy_config import DEFAULT_DEPTH_POLICY
-from strategy_core import DIRECTIONS, apply_move, empty_cells
+from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells
 from strategy_eval import _roughness, normalize_powers, score_board
+
+_SEARCH_CACHE_CAP = 250_000
+_SEARCH_CACHE: OrderedDict = OrderedDict()
+_SEARCH_CACHE_HITS = 0
+_SEARCH_CACHE_MISSES = 0
+
+
+def reset_search_trans_cache() -> None:
+    _SEARCH_CACHE.clear()
+    reset_search_trans_stats()
+
+
+def reset_search_trans_stats() -> None:
+    global _SEARCH_CACHE_HITS, _SEARCH_CACHE_MISSES
+    _SEARCH_CACHE_HITS = 0
+    _SEARCH_CACHE_MISSES = 0
+
+
+def get_search_trans_stats() -> dict:
+    return {"hits": _SEARCH_CACHE_HITS, "misses": _SEARCH_CACHE_MISSES, "size": len(_SEARCH_CACHE)}
+
+
+def _search_cache_get(key):
+    global _SEARCH_CACHE_HITS, _SEARCH_CACHE_MISSES
+    if key not in _SEARCH_CACHE:
+        _SEARCH_CACHE_MISSES += 1
+        return None
+    _SEARCH_CACHE_HITS += 1
+    _SEARCH_CACHE.move_to_end(key, last=True)
+    return _SEARCH_CACHE[key]
+
+
+def _search_cache_store(key, value: float) -> None:
+    if key in _SEARCH_CACHE:
+        _SEARCH_CACHE[key] = value
+        _SEARCH_CACHE.move_to_end(key, last=True)
+        return
+    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_CAP:
+        _SEARCH_CACHE.popitem(last=False)
+    _SEARCH_CACHE[key] = value
+
+
+def _search_key(board: list[list[int]], powers: dict, depth: int, is_max: bool) -> tuple:
+    return (board_to_bb(board), powers["swap"], powers["delete"], depth, 1 if is_max else 0)
 
 
 def auto_depth(board: list[list[int]]) -> int:
@@ -70,8 +115,15 @@ def auto_depth(board: list[list[int]]) -> int:
 
 def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict | None = None) -> float:
     powers = normalize_powers(powers)
+    key = _search_key(board, powers, depth, is_max)
+    cached = _search_cache_get(key)
+    if cached is not None:
+        return cached
+
     if depth == 0:
-        return score_board(board, powers)
+        out = score_board(board, powers)
+        _search_cache_store(key, out)
+        return out
 
     if is_max:
         best = float("-inf")
@@ -84,11 +136,15 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
             val = _expectimax(nb, depth - 1, False, powers)
             if val > best:
                 best = val
-        return best if any_valid else score_board(board, powers)
+        out = best if any_valid else score_board(board, powers)
+        _search_cache_store(key, out)
+        return out
 
     empties = empty_cells(board)
     if not empties:
-        return score_board(board, powers)
+        out = score_board(board, powers)
+        _search_cache_store(key, out)
+        return out
     sample = empties if len(empties) <= 6 else empties[::len(empties) // 6 + 1][:6]
 
     total = 0.0
@@ -98,7 +154,9 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
         board[r][c] = 4
         total += 0.1 * _expectimax(board, depth - 1, True, powers)
         board[r][c] = 0
-    return total / len(sample)
+    out = total / len(sample)
+    _search_cache_store(key, out)
+    return out
 
 
 def apply_swap(board: list[list[int]], r1: int, c1: int, r2: int, c2: int) -> list[list[int]]:

@@ -36,7 +36,7 @@ from strategy_eval import (  # noqa: F401
     get_trans_stats,
     load_trans_table,
     normalize_powers,
-    reset_trans_cache,
+    reset_trans_cache as reset_eval_trans_cache,
     reset_trans_stats,
     score_board,
     score_from_features,
@@ -49,7 +49,16 @@ from strategy_search import (  # noqa: F401
     best_action,
     best_action_obj,
     best_move,
+    get_search_trans_stats,
+    reset_search_trans_cache,
+    reset_search_trans_stats,
 )
+
+
+def reset_trans_cache() -> None:
+    """Reset both evaluation and search transposition caches."""
+    reset_eval_trans_cache()
+    reset_search_trans_cache()
 
 __all__ = [
     "Action",
@@ -86,7 +95,10 @@ __all__ = [
     "is_game_over",
     "load_trans_table",
     "normalize_powers",
+    "get_search_trans_stats",
     "reset_trans_cache",
+    "reset_search_trans_cache",
+    "reset_search_trans_stats",
     "reset_trans_stats",
     "score_board",
     "score_from_features",
