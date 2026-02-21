@@ -63,6 +63,10 @@ _CREATE_ENTRIES_SQL = """
     )
 """
 _CREATE_VERSION_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_version ON entries(version)"
+_CREATE_VERSION_KEY_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_version_board_power "
+    "ON entries(version, board_bb, swap_uses, delete_uses)"
+)
 
 
 # ── Signed-int helpers (SQLite stores INTEGER as signed 64-bit) ───────────────
@@ -115,6 +119,7 @@ def init_db() -> None:
         _set_rw_pragmas(conn)
         conn.execute(_CREATE_ENTRIES_SQL)
         conn.execute(_CREATE_VERSION_INDEX_SQL)
+        conn.execute(_CREATE_VERSION_KEY_INDEX_SQL)
         conn.commit()
     finally:
         conn.close()
