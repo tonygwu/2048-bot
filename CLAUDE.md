@@ -33,18 +33,24 @@ pypy3.10 -m venv .venv
 
 # ── Strategy test harness (no browser required) ───────────────────────────────
 # List all fixture boards
-python3 tests/run.py
+.venv/bin/python tests/run.py
 
 # Run 10 moves on a fixture (auto depth, random tile spawns)
-python3 tests/run.py mid_game
+.venv/bin/python tests/run.py mid_game
 
 # Common flag combinations
-python3 tests/run.py mid_game --moves 20 --depth 4 --seed 42
-python3 tests/run.py jammed --scores          # print expectimax score per direction
-python3 tests/run.py swap_test --peek         # show only the first action, then stop
-python3 tests/run.py late_game --no-random    # skip tile placement (pure decision trace)
+.venv/bin/python tests/run.py mid_game --moves 20 --depth 4 --seed 42
+.venv/bin/python tests/run.py jammed --scores          # print expectimax score per direction
+.venv/bin/python tests/run.py swap_test --peek         # show only the first action, then stop
+.venv/bin/python tests/run.py late_game --no-random    # skip tile placement (pure decision trace)
 
-# Depth calibration benchmark (no browser required)
+# Canonical evaluator (shared metrics for heuristic + depth experiments)
+.venv/bin/python tests/evaluator.py
+.venv/bin/python tests/evaluator.py --suite fixtures --depths 3,4,5 --seeds 30 --moves 80
+.venv/bin/python tests/evaluator.py --suite fixtures --boards late_game,jammed --depths 4 --per-fixture
+.venv/bin/python tests/evaluator.py --suite depth_calibration --depths 2,3,4,5 --seeds 5 --moves 25
+
+# Compatibility wrapper (delegates to tests/evaluator.py depth_calibration suite)
 .venv/bin/python benchmark_depth.py
 .venv/bin/python benchmark_depth.py --moves 15 --seeds 3         # quick pass
 .venv/bin/python benchmark_depth.py --depths 3,4,5,6 --seeds 8   # deeper comparison
@@ -106,6 +112,22 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 - `score_board(board, powers)` is cached by `(board_bb, swap_uses, delete_uses)` and currently uses: empty cells, snake gradient, direction-aware monotonicity (rows follow snake direction), roughness (subtracted), merge potential, max tile log2, `log2(sum_tiles+1)`, legal move count, corner bonus when max tile is at `(0,0)`, and power-up value.
 - Power-up proximity is intentionally damped/gated: swap proximity starts at max tile `>=128`, delete proximity at `>=256`, each scaled by `0.25`, and proximity goes to `0` once unlock threshold is reached (`256`/`512`) so the heuristic does not carry phantom inventory.
 - Snake weight matrix puts upper-left corner at weight 16, zigzagging down to 1 at lower-left.
+
+### Canonical evaluation metrics (`tests/evaluator.py`)
+
+Use these definitions consistently when comparing strategy changes:
+
+| Metric | Definition |
+|---|---|
+| `avg_score` | Average final in-game score across runs |
+| `avg_max` | Average highest tile reached by end of run |
+| `survive%` | Percent of runs that reached the configured move cap |
+| `reach2048%` | Percent of runs whose max tile reached at least 2048 |
+| `reach4096%` | Percent of runs whose max tile reached at least 4096 |
+| `reach8192%` | Percent of runs whose max tile reached at least 8192 |
+| `avg_moves` | Average number of executed actions per run |
+| `avg_eval` | Average final `score_board(board, powers)` value |
+| `avg_think_ms` | Average `best_action` compute time per executed action |
 
 **`bot.py`** — Async game loop
 
