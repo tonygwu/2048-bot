@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Setup
+
+On a fresh clone, create the virtual environment and install dependencies:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install playwright pillow
+.venv/bin/playwright install chromium
+```
+
 ## Commands
 
 ```bash
@@ -37,9 +47,9 @@ Three files, no external game logic libraries:
 **`strategy.py`** — Pure-Python Expectimax AI, no I/O
 
 - `apply_move(board, direction)` → `(new_board, score_delta, changed)`. Does NOT place a new tile; that is done by the chance node.
-- `best_action(board, powers, depth)` evaluates all regular moves plus swap/delete power-ups. Returns a tuple: `("move", dir)`, `("swap", r1,c1,r2,c2)`, or `("delete", value, row, col)`. Power-ups carry a shadow cost (`_SWAP_COST=380`, `_DELETE_COST=420`) so they are only chosen when substantially better than the best move.
-- `_expectimax(board, depth, is_max)`: max nodes try all 4 directions; chance nodes place 2 (90%) or 4 (10%) in empty cells. When more than 6 cells are empty, cells are subsampled to cap branching.
-- `score_board(board)` is the 7-term heuristic: empty cells, snake gradient, penalty-based monotonicity (returns 0 for perfect, negative for imperfect), roughness (subtracted), merge potential, max tile log2, tile sum.
+- `best_action(board, powers, depth)` evaluates all regular moves plus swap/delete power-ups. Returns a tuple: `("move", dir)`, `("swap", r1,c1,r2,c2)`, or `("delete", value, row, col)`. Power-up cost is priced implicitly: the tree receives a decremented `powers` dict, so every leaf evaluation reflects the lost use.
+- `_expectimax(board, depth, is_max, powers)`: max nodes try all 4 directions; chance nodes place 2 (90%) or 4 (10%) in empty cells. When more than 6 cells are empty, cells are subsampled to cap branching. `powers` is threaded through unchanged (no power-ups are used within the tree).
+- `score_board(board, powers)` is an 8-term heuristic: empty cells, snake gradient, penalty-based monotonicity (returns 0 for perfect, negative for imperfect), roughness (subtracted), merge potential, max tile log2, tile sum, and power-up value. Power-up value = `_W_PU_BASE × log2(max_tile) × effective_uses` where effective_uses = actual uses + proximity bonus (0–0.95 based on how close max_tile is to the unlock threshold: 256 for swap, 512 for delete). Proximity bonus is zeroed when at the cap (2 uses), incentivising spending a use right before earning a replacement.
 - Snake weight matrix puts upper-left corner at weight 16, zigzagging down to 1 at lower-left.
 
 **`bot.py`** — Async game loop
