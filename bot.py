@@ -250,29 +250,44 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
             print_board(state)
 
         # ── Execute the action ────────────────────────────────────────────────
-        if action_type == "move":
-            await execute_move(page, action[1])
+        try:
+            if action_type == "move":
+                await execute_move(page, action[1])
 
-        elif action_type == "swap":
-            _, r1, c1, r2, c2 = action
-            v1, v2 = state.board[r1][c1], state.board[r2][c2]
-            print(
-                f"\n[Move {move_count}]  *** SWAP {v1}@({r1},{c1}) <-> {v2}@({r2},{c2}) ***"
-                f"  depth={depth}  (think: {think_ms:.0f}ms)"
-            )
-            print_board(state)
-            await execute_swap(page, r1, c1, r2, c2)
-            powers_used["swap"] += 1
+            elif action_type == "swap":
+                _, r1, c1, r2, c2 = action
+                v1, v2 = state.board[r1][c1], state.board[r2][c2]
+                print(
+                    f"\n[Move {move_count}]  *** SWAP {v1}@({r1},{c1}) <-> {v2}@({r2},{c2}) ***"
+                    f"  depth={depth}  (think: {think_ms:.0f}ms)"
+                )
+                print_board(state)
+                await execute_swap(page, r1, c1, r2, c2)
+                powers_used["swap"] += 1
 
-        elif action_type == "delete":
-            _, value, row, col = action
+            elif action_type == "delete":
+                _, value, row, col = action
+                print(
+                    f"\n[Move {move_count}]  *** DELETE all {value}-tiles ***"
+                    f"  depth={depth}  (think: {think_ms:.0f}ms)"
+                )
+                print_board(state)
+                await execute_delete(page, row, col)
+                powers_used["delete"] += 1
+        except Exception as exc:
             print(
-                f"\n[Move {move_count}]  *** DELETE all {value}-tiles ***"
-                f"  depth={depth}  (think: {think_ms:.0f}ms)"
+                f"\n[Move {move_count}]  Action execution failed "
+                f"({type(exc).__name__}): {exc}"
             )
-            print_board(state)
-            await execute_delete(page, row, col)
-            powers_used["delete"] += 1
+            # Recover focus and continue loop so one transient UI failure
+            # does not terminate the whole run before summary output.
+            try:
+                await page.keyboard.press("Escape")
+                await page.locator("canvas").first.click(timeout=500)
+            except Exception:
+                pass
+            await asyncio.sleep(0.15)
+            continue
 
         # ── Stuck-board guard ─────────────────────────────────────────────────
         if state.board == prev_board and action_type == "move":
@@ -364,7 +379,39 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
     try:
         for game_num in range(1, num_games + 1):
             reset_trans_stats()
-            stats = await play_one_game(page, depth_arg, game_num)
+            try:
+                stats = await play_one_game(page, depth_arg, game_num)
+            except Exception as exc:
+                print(
+                    f"\nGame {game_num} aborted with exception "
+                    f"({type(exc).__name__}): {exc}"
+                )
+                try:
+                    state = await read_state(page)
+                    fallback_max = max(v for row in state.board for v in row)
+                    stats = {
+                        "game": game_num,
+                        "score": state.score,
+                        "best": state.best,
+                        "moves": 0,
+                        "max_tile": fallback_max,
+                        "elapsed": 0.0,
+                        "powers_used": {"undo": 0, "swap": 0, "delete": 0},
+                        "cache_by_tile_bucket": {},
+                        **_depth_stats([]),
+                    }
+                except Exception:
+                    stats = {
+                        "game": game_num,
+                        "score": 0,
+                        "best": 0,
+                        "moves": 0,
+                        "max_tile": 0,
+                        "elapsed": 0.0,
+                        "powers_used": {"undo": 0, "swap": 0, "delete": 0},
+                        "cache_by_tile_bucket": {},
+                        **_depth_stats([]),
+                    }
 
             # ── Print cache stats for this game ───────────────────────────────
             ts = get_trans_stats()
