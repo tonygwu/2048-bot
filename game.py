@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 URL = "https://play2048.co/"
-MOVE_DELAY = 0.15   # seconds to wait after a move for animation to settle
+MOVE_DELAY = 0.15   # fallback delay if worker-update wait times out
+UPDATE_WAIT_TIMEOUT_MS = 220
 
 
 @dataclass
@@ -37,6 +38,8 @@ ARROW_KEYS = {
 WORKER_INTERCEPT_JS = """
 (function() {
     window._workerMsgs = [];
+    window._lastWorkerUpdate = null;
+    window._workerUpdateSeq = 0;
 
     const OrigWorker = window.Worker;
     window.Worker = function(url, options) {
@@ -46,6 +49,10 @@ WORKER_INTERCEPT_JS = """
         worker.postMessage = function(data, transferOrOptions) {
             try {
                 window._workerMsgs.push({ dir: 'to', data: JSON.parse(JSON.stringify(data)) });
+                if (data && data.type === 'call' && data.call === 'update') {
+                    window._lastWorkerUpdate = JSON.parse(JSON.stringify(data));
+                    window._workerUpdateSeq += 1;
+                }
                 if (window._workerMsgs.length > 200) window._workerMsgs.splice(0, 100);
             } catch(e) {}
             return transferOrOptions !== undefined
@@ -56,6 +63,10 @@ WORKER_INTERCEPT_JS = """
         worker.addEventListener('message', function(e) {
             try {
                 window._workerMsgs.push({ dir: 'from', data: JSON.parse(JSON.stringify(e.data)) });
+                if (e.data && e.data.type === 'call' && e.data.call === 'update') {
+                    window._lastWorkerUpdate = JSON.parse(JSON.stringify(e.data));
+                    window._workerUpdateSeq += 1;
+                }
                 if (window._workerMsgs.length > 200) window._workerMsgs.splice(0, 100);
             } catch(e) {}
         });
@@ -81,13 +92,15 @@ async def launch_browser(headless: bool = False):
     # Close welcome overlay with Escape
     await page.keyboard.press("Escape")
     await asyncio.sleep(0.2)
-    # Wait until the first worker "update" message arrives (initial board state)
-    for _ in range(30):
-        msgs = await page.evaluate("() => window._workerMsgs || []")
-        for msg in msgs:
-            if isinstance(msg.get("data"), dict) and msg["data"].get("call") == "update":
-                return pw, browser, page
-        await asyncio.sleep(0.2)
+    # Wait until the first worker "update" message arrives (initial board state).
+    try:
+        await page.wait_for_function(
+            "() => (window._workerUpdateSeq || 0) > 0",
+            timeout=6000,
+        )
+    except Exception:
+        # Fallback to eventual read_state screenshot path if worker stream is delayed.
+        pass
     return pw, browser, page
 
 
@@ -236,27 +249,63 @@ async def read_board_from_screenshot(page: Page) -> list[list[int]] | None:
 
 # ── Main state reader ─────────────────────────────────────────────────────────
 async def read_state(page: Page) -> GameState:
-    score, best = await read_score(page)
-    board = None
-    powers: dict = {}
-    msgs = await page.evaluate("() => window._workerMsgs || []")
-    for msg in reversed(msgs):
-        d = msg.get("data")
-        b = _parse_update_board(d)
-        if b is not None:
-            board = b
-            powers = _parse_powerups(d)
-            break
+    # Single browser round-trip for worker snapshot + score + overlay flags.
+    snap = await page.evaluate(
+        """
+        () => {
+          const update = window._lastWorkerUpdate || null;
+          const spans = Array.from(document.querySelectorAll('span.shrink-1.truncate'));
+          const scoreText = spans[0] ? (spans[0].textContent || '') : '';
+          const bestText = spans[1] ? (spans[1].textContent || '') : '';
+          const bodyText = document.body ? (document.body.innerText || '') : '';
+          return {
+            update,
+            scoreText,
+            bestText,
+            over: bodyText.includes('Game over'),
+            won: bodyText.includes('You win'),
+          };
+        }
+        """
+    )
+
+    def _safe_int(s: str) -> int:
+        try:
+            return int((s or "").strip().replace(",", ""))
+        except Exception:
+            return 0
+
+    score = _safe_int(snap.get("scoreText", ""))
+    best = _safe_int(snap.get("bestText", ""))
+    board = _parse_update_board(snap.get("update"))
+    powers: dict = _parse_powerups(snap.get("update") or {})
     if board is None:
         board = await read_board_from_screenshot(page) or [[0]*4 for _ in range(4)]
-    over = await page.locator("text=Game over").count() > 0
-    won  = await page.locator("text=You win").count() > 0
+    over = bool(snap.get("over"))
+    won = bool(snap.get("won"))
     return GameState(board=board, score=score, best=best, over=over, won=won, powers=powers)
 
 
 # ── Move execution ────────────────────────────────────────────────────────────
 async def execute_move(page: Page, direction: str) -> None:
-    await page.keyboard.press(ARROW_KEYS[direction])
+    seq = await page.evaluate("() => window._workerUpdateSeq || 0")
+    # Retry once with explicit canvas focus if the first keypress is dropped.
+    for attempt in range(2):
+        if attempt > 0:
+            try:
+                await page.locator("canvas").first.click(timeout=300)
+            except Exception:
+                pass
+        await page.keyboard.press(ARROW_KEYS[direction])
+        try:
+            await page.wait_for_function(
+                "prev => (window._workerUpdateSeq || 0) > prev",
+                arg=seq,
+                timeout=UPDATE_WAIT_TIMEOUT_MS,
+            )
+            return
+        except Exception:
+            pass
     await asyncio.sleep(MOVE_DELAY)
 
 
@@ -264,10 +313,20 @@ async def execute_move(page: Page, direction: str) -> None:
 POWER_DELAY = 0.35   # seconds to wait after each power-up interaction step
 
 
+async def _wait_for_worker_update(page: Page, prev_seq: int, fallback_delay: float = MOVE_DELAY) -> None:
+    try:
+        await page.wait_for_function(
+            "prev => (window._workerUpdateSeq || 0) > prev",
+            arg=prev_seq,
+            timeout=UPDATE_WAIT_TIMEOUT_MS,
+        )
+    except Exception:
+        await asyncio.sleep(fallback_delay)
+
+
 async def _power_buttons(page: Page) -> list:
     """Return the three power-up buttons (those with 'aspect-square' in their class)."""
-    all_btns = await page.query_selector_all("button")
-    return [b for b in all_btns if "aspect-square" in (await b.get_attribute("class") or "")]
+    return await page.query_selector_all("button[class*='aspect-square']")
 
 
 async def click_tile(page: Page, row: int, col: int) -> None:
@@ -277,16 +336,18 @@ async def click_tile(page: Page, row: int, col: int) -> None:
         return
     x = box["x"] + _CELL_NORM[col] * box["width"]
     y = box["y"] + _CELL_NORM[row] * box["height"]
+    seq = await page.evaluate("() => window._workerUpdateSeq || 0")
     await page.mouse.click(x, y)
-    await asyncio.sleep(POWER_DELAY)
+    await _wait_for_worker_update(page, seq, fallback_delay=POWER_DELAY)
 
 
 async def execute_undo(page: Page) -> None:
     """Use the Undo power-up (first aspect-square button)."""
     btns = await _power_buttons(page)
     if btns:
+        seq = await page.evaluate("() => window._workerUpdateSeq || 0")
         await btns[0].click()
-        await asyncio.sleep(POWER_DELAY)
+        await _wait_for_worker_update(page, seq, fallback_delay=POWER_DELAY)
 
 
 async def execute_undo_on_gameover(page: Page) -> None:
@@ -311,8 +372,9 @@ async def execute_swap(page: Page, r1: int, c1: int, r2: int, c2: int) -> None:
     """Use the Swap power-up: activate, then click the two tile positions."""
     btns = await _power_buttons(page)
     if len(btns) >= 2:
+        seq = await page.evaluate("() => window._workerUpdateSeq || 0")
         await btns[1].click()
-        await asyncio.sleep(POWER_DELAY)
+        await _wait_for_worker_update(page, seq, fallback_delay=POWER_DELAY)
         await click_tile(page, r1, c1)
         await click_tile(page, r2, c2)
 
@@ -321,8 +383,9 @@ async def execute_delete(page: Page, row: int, col: int) -> None:
     """Use the Delete power-up: activate, then click a tile of the target value."""
     btns = await _power_buttons(page)
     if len(btns) >= 3:
+        seq = await page.evaluate("() => window._workerUpdateSeq || 0")
         await btns[2].click()
-        await asyncio.sleep(POWER_DELAY)
+        await _wait_for_worker_update(page, seq, fallback_delay=POWER_DELAY)
         await click_tile(page, row, col)
 
 

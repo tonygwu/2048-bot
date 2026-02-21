@@ -50,6 +50,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
 
     prev_board = None
     stuck_count = 0
+    stuck_recoveries = 0
     best_score_seen = 0
     powers_used = {"undo": 0, "swap": 0, "delete": 0}
     win_overlay_dismissed = False  # only dismiss once; DOM element persists hidden after dismissal
@@ -191,7 +192,21 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
         if state.board == prev_board and action_type == "move":
             stuck_count += 1
             if stuck_count >= 5:
-                print(f"\nBoard stuck for {stuck_count} moves — ending game.")
+                if stuck_recoveries < 2:
+                    stuck_recoveries += 1
+                    stuck_count = 0
+                    print(
+                        f"\nBoard looked stuck for 5 moves — attempting recovery "
+                        f"({stuck_recoveries}/2) by refocusing canvas."
+                    )
+                    try:
+                        await page.keyboard.press("Escape")
+                        await page.locator("canvas").first.click(timeout=500)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.12)
+                    continue
+                print(f"\nBoard stuck after recovery attempts — ending game.")
                 break
         else:
             stuck_count = 0
