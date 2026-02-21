@@ -61,6 +61,19 @@ def _depth_stats(depths: list[int]) -> dict:
     }
 
 
+def _cache_bucket_key(max_tile: int) -> int:
+    """Bucket key for cache stats by current max tile (0 = <512)."""
+    if max_tile < 512:
+        return 0
+    return max(512, 1 << (max_tile.bit_length() - 1))
+
+
+def _cache_bucket_label(key: int) -> str:
+    if key == 0:
+        return "<512"
+    return f"{key}-{(key * 2) - 1}"
+
+
 async def play_one_game(page, depth_arg, game_num: int) -> dict:
     """Play a single game to completion. Returns stats dict.
 
@@ -83,6 +96,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
     best_score_seen = 0
     powers_used = {"undo": 0, "swap": 0, "delete": 0}
     depth_samples: list[int] = []
+    cache_by_tile_bucket: dict[int, dict[str, int]] = {}
     win_overlay_dismissed = False  # only dismiss once; DOM element persists hidden after dismissal
     win_overlay_retry_count = 0
 
@@ -137,6 +151,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                 "max_tile": max_tile,
                 "elapsed": elapsed,
                 "powers_used": dict(powers_used),
+                "cache_by_tile_bucket": dict(cache_by_tile_bucket),
                 **_depth_stats(depth_samples),
             }
 
@@ -159,6 +174,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                 "max_tile": max_tile,
                 "elapsed": elapsed,
                 "powers_used": dict(powers_used),
+                "cache_by_tile_bucket": dict(cache_by_tile_bucket),
                 **_depth_stats(depth_samples),
             }
 
@@ -192,9 +208,17 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
             last_depth = depth
 
         # ── Choose best action (move or power-up) ─────────────────────────────
+        ts_before = get_trans_stats()
         t0 = time.time()
         action = best_action(state.board, state.powers, depth=depth)
         think_ms = (time.time() - t0) * 1000
+        ts_after = get_trans_stats()
+        delta_hits = ts_after["hits"] - ts_before["hits"]
+        delta_misses = ts_after["misses"] - ts_before["misses"]
+        bkey = _cache_bucket_key(max_tile)
+        bucket = cache_by_tile_bucket.setdefault(bkey, {"hits": 0, "misses": 0})
+        bucket["hits"] += max(0, delta_hits)
+        bucket["misses"] += max(0, delta_misses)
 
         if action is None:
             # Some terminal boards are detected by strategy one iteration before
@@ -281,6 +305,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
         "max_tile": max(v for row in state.board for v in row),
         "elapsed": time.time() - t_start,
         "powers_used": dict(powers_used),
+        "cache_by_tile_bucket": dict(cache_by_tile_bucket),
         **_depth_stats(depth_samples),
     }
 
@@ -389,6 +414,23 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
                 f"{hr:>8.1f}%  {depth_tuple:>25}  "
                 f"S={pu.get('swap',0)} D={pu.get('delete',0)}"
             )
+
+        print("\nCacheHit% by max-tile bucket:")
+        for s in all_stats:
+            print(f"  Game {s['game']}:")
+            buckets = s.get("cache_by_tile_bucket", {})
+            if not buckets:
+                print("    (no cache lookups)")
+                continue
+            for key in sorted(buckets.keys()):
+                hs = buckets[key]["hits"]
+                ms = buckets[key]["misses"]
+                total = hs + ms
+                rate = hs * 100.0 / total if total else 0.0
+                print(
+                    f"    {_cache_bucket_label(key):>10}: "
+                    f"{rate:5.1f}%  (hits={hs:,}, misses={ms:,})"
+                )
 
         if not headless:
             print("\nKeeping browser open for 25s so you can see the final state…")
