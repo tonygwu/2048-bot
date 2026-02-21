@@ -286,12 +286,16 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
             ts = get_trans_stats()
             total_lookups = ts["hits"] + ts["misses"]
             hit_rate = ts["hits"] / total_lookups * 100 if total_lookups else 0.0
+            # Unique additions can be lower than misses because the same missing
+            # key may be evaluated more than once in a game.
+            new_entries = drain_new_entries()
+            unique_additions = sum(1 for k in new_entries if k not in cached)
             print(f"\nCache stats (game {game_num}): "
-                  f"hits={ts['hits']:,}  misses={ts['misses']:,}  "
-                  f"hit_rate={hit_rate:.1f}%  table_size={len(cached) + ts['misses']:,}")
+                  f"loaded={len(cached):,}  hits={ts['hits']:,}  misses={ts['misses']:,}  "
+                  f"hit_rate={hit_rate:.1f}%  unique_new={len(new_entries):,}  "
+                  f"table_size={len(cached) + unique_additions:,}")
 
             # ── Flush new entries to DB ────────────────────────────────────────
-            new_entries = drain_new_entries()
             if new_entries:
                 written = db.save_entries(new_entries, SCORE_BOARD_VERSION)
                 print(f"  Flushed {written:,} new entries to DB.")
