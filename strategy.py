@@ -21,6 +21,7 @@ _TRANS_TABLE: dict = {}      # (board_bb, swap_uses, delete_uses) → score
 _NEW_ENTRIES: dict = {}      # same keys — entries added this run (for DB flush)
 _TRANS_STATS = {"hits": 0, "misses": 0}
 _TRANS_CAP   = 500_000       # evict (clear all) when table grows beyond this
+_KEEP_OVERSIZED_PRELOAD = False  # preserve huge DB preloads instead of nuking on first miss
 
 
 def board_to_bb(board: list[list[int]]) -> int:
@@ -37,6 +38,8 @@ def board_to_bb(board: list[list[int]]) -> int:
 def load_trans_table(entries: dict) -> None:
     """Bulk-load pre-computed entries into _TRANS_TABLE (called at bot startup)."""
     _TRANS_TABLE.update(entries)
+    global _KEEP_OVERSIZED_PRELOAD
+    _KEEP_OVERSIZED_PRELOAD = len(_TRANS_TABLE) > _TRANS_CAP
 
 
 def drain_new_entries() -> dict:
@@ -399,8 +402,15 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
         + _powerup_value(max_val, powers)
     )
 
+    global _KEEP_OVERSIZED_PRELOAD
     if len(_TRANS_TABLE) >= _TRANS_CAP:
+        if _KEEP_OVERSIZED_PRELOAD:
+            # When a large table is preloaded from SQLite, keep it intact and
+            # avoid inserting new in-memory keys once at capacity.
+            _NEW_ENTRIES[key] = result
+            return result
         _TRANS_TABLE.clear()
+        _KEEP_OVERSIZED_PRELOAD = False
     _TRANS_TABLE[key] = result
     _NEW_ENTRIES[key] = result
     return result

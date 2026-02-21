@@ -15,7 +15,9 @@ _to_signed / _from_signed helpers and reconstruct the unsigned value on read.
 import os
 import sqlite3
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "cache", "transposition.db")
+_DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "cache", "transposition.db")
+_ENV_DB_PATH = os.environ.get("TRANS_DB_PATH")
+DB_PATH = os.path.abspath(os.path.expanduser(_ENV_DB_PATH)) if _ENV_DB_PATH else _DEFAULT_DB_PATH
 
 
 # ── Signed-int helpers (SQLite stores INTEGER as signed 64-bit) ───────────────
@@ -33,7 +35,9 @@ def _from_signed(val: int) -> int:
 # ── DB init ───────────────────────────────────────────────────────────────────
 
 def _connect() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS entries (
