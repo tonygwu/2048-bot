@@ -15,7 +15,7 @@ DIRECTIONS = ["up", "down", "left", "right"]
 # ── Transposition table ────────────────────────────────────────────────────────
 # Bump this string whenever heuristic weights or eval logic changes.
 # The SQLite cache stores scores per-version; stale entries are ignored.
-SCORE_BOARD_VERSION = "1.0"
+SCORE_BOARD_VERSION = "1.1"
 
 _TRANS_TABLE: dict = {}      # (board_bb, swap_uses, delete_uses) → score
 _NEW_ENTRIES: dict = {}      # same keys — entries added this run (for DB flush)
@@ -141,7 +141,8 @@ def is_game_over(board: list[list[int]]) -> bool:
 # ── Heuristic evaluation ───────────────────────────────────────────────────────
 #
 # Eval: V(s,p) = w_E·E + w_G·G(s) + w_mono·Mono(s) − w_rough·Rough(s)
-#             + w_merge·MergePot(s) + w_max·M + w_score·ΣTile
+#             + w_merge·MergePot(s) + w_max·M + w_sum·log2(ΣTile+1)
+#             + w_mob·LegalMoves(s)
 #             + PowerupValue(s, p)
 #
 # All tile quantities are in log-space: L(x) = log2(x), L(0) = 0.
@@ -163,7 +164,8 @@ _W_MONO   =  47.0   # monotonicity (penalty-based; higher = more monotone)
 _W_ROUGH  =  35.0   # roughness penalty (subtracted)
 _W_MERGE  =  65.0   # near-term merge potential
 _W_MAX    = 120.0   # explicit max-tile push (log2 of max tile)
-_W_SCORE  =   1.0   # score proxy (sum of tile values; keep small)
+_W_SUMLOG = 140.0   # compressed tile-mass signal: log2(sum tiles + 1)
+_W_MOB    =  95.0   # legal move count (0..4), favors robust/maneuverable states
 _W_CORNER =  80.0   # bonus per log2(max_tile) when max tile sits at (0,0)
 
 # Row directions required by the snake pattern:
@@ -289,6 +291,16 @@ def _merge_potential(board: list[list[int]]) -> float:
     return s
 
 
+def _legal_move_count(board: list[list[int]]) -> int:
+    """Number of directions that change the board (0..4)."""
+    count = 0
+    for d in DIRECTIONS:
+        _, _, changed = apply_move(board, d)
+        if changed:
+            count += 1
+    return count
+
+
 def _proximity_to_unlock(max_tile: int, unlock_tile: int) -> float:
     """Fraction of the way to the next power-up unlock, in log2-space.
 
@@ -325,8 +337,14 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
     swap_uses   = min(powers.get("swap",   0), _MAX_SWAP_USES)
     delete_uses = min(powers.get("delete", 0), _MAX_DELETE_USES)
 
-    prox_swap   = _proximity_to_unlock(max_tile, _SWAP_UNLOCK_TILE)   if swap_uses   < _MAX_SWAP_USES   else 0.0
-    prox_delete = _proximity_to_unlock(max_tile, _DELETE_UNLOCK_TILE) if delete_uses < _MAX_DELETE_USES else 0.0
+    # Dampen and gate proximity so early-game boards do not overvalue
+    # hypothetical future unlocks over immediate survival/shape quality.
+    prox_swap = 0.0
+    prox_delete = 0.0
+    if max_tile >= 128 and swap_uses < _MAX_SWAP_USES:
+        prox_swap = 0.25 * _proximity_to_unlock(max_tile, _SWAP_UNLOCK_TILE)
+    if max_tile >= 256 and delete_uses < _MAX_DELETE_USES:
+        prox_delete = 0.25 * _proximity_to_unlock(max_tile, _DELETE_UNLOCK_TILE)
 
     effective_swaps   = swap_uses   + prox_swap
     effective_deletes = delete_uses + prox_delete
@@ -363,6 +381,7 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
     max_val = max(board[r][c] for r in range(4) for c in range(4))
     tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
+    legal_moves = _legal_move_count(board)
 
     corner_bonus = (_W_CORNER * math.log2(max_val)
                     if max_val > 0 and board[0][0] == max_val else 0.0)
@@ -374,7 +393,8 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
         - _W_ROUGH * _roughness(board)
         + _W_MERGE * _merge_potential(board)
         + _W_MAX   * (math.log2(max_val) if max_val > 0 else 0.0)
-        + _W_SCORE * tile_sum
+        + _W_SUMLOG * math.log2(tile_sum + 1.0)
+        + _W_MOB   * legal_moves
         + corner_bonus
         + _powerup_value(max_val, powers)
     )
