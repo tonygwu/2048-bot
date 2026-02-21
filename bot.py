@@ -102,11 +102,21 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                     f"Undoing to keep going!"
                 )
                 print_board(state)
+                board_before_undo = [row[:] for row in state.board]
                 await execute_undo_on_gameover(page)
                 powers_used["undo"] += 1
-                stuck_count = 0
-                prev_board = None
-                continue
+                # Give the game a moment to settle after the undo animation
+                await asyncio.sleep(0.4)
+                state_after = await read_state(page)
+                if state_after.over and state_after.board == board_before_undo:
+                    # Undo didn't change anything — overlay may have failed to click.
+                    # Don't loop forever; treat as real game over.
+                    print(f"\n[Move {move_count}]  Undo had no effect — treating as final game over.")
+                    state = state_after
+                else:
+                    stuck_count = 0
+                    prev_board = None
+                    continue
 
             elapsed = time.time() - t_start
             print(f"\nGame over after {move_count} moves ({elapsed:.1f}s)")
