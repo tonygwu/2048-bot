@@ -48,6 +48,9 @@ python3 tests/run.py late_game --no-random    # skip tile placement (pure decisi
 .venv/bin/python benchmark_depth.py
 .venv/bin/python benchmark_depth.py --moves 15 --seeds 3         # quick pass
 .venv/bin/python benchmark_depth.py --depths 3,4,5,6 --seeds 8   # deeper comparison
+
+# Phase-1 regression checks for strategy action APIs
+python3 -m unittest tests/test_strategy_actions.py
 ```
 
 ### Board fixtures (`tests/boards/*.json`)
@@ -93,9 +96,11 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 **`strategy.py`** — Pure-Python Expectimax AI, no I/O
 
 - `apply_move(board, direction)` → `(new_board, score_delta, changed)`. Does NOT place a new tile; that is done by the chance node.
-- `best_action(board, powers, depth)` evaluates all regular moves plus swap/delete power-ups. Returns a tuple: `("move", dir)`, `("swap", r1,c1,r2,c2)`, or `("delete", value, row, col)`. Power-up cost is priced implicitly: the tree receives a decremented `powers` dict, so every leaf evaluation reflects the lost use.
+- `best_action_obj(board, powers, depth)` evaluates all regular moves plus swap/delete power-ups and returns typed actions: `MoveAction`, `SwapAction`, `DeleteAction`.
+- `best_action(board, powers, depth)` is the backwards-compatible tuple wrapper over `best_action_obj`: `("move", dir)`, `("swap", r1,c1,r2,c2)`, or `("delete", value, row, col)`.
 - `_expectimax(board, depth, is_max, powers)`: max nodes try all 4 directions; chance nodes place 2 (90%) or 4 (10%) in empty cells. When more than 6 cells are empty, cells are subsampled to cap branching. `powers` is threaded through unchanged (no power-ups are used within the tree).
-- `score_board(board, powers)` is an 8-term heuristic: empty cells, snake gradient, penalty-based monotonicity (returns 0 for perfect, negative for imperfect), roughness (subtracted), merge potential, max tile log2, tile sum, and power-up value. Power-up value = `_W_PU_BASE × log2(max_tile) × effective_uses` where effective_uses = actual uses + proximity bonus (0–0.95 based on how close max_tile is to the unlock threshold: 256 for swap, 512 for delete). Proximity bonus is zeroed when at the cap (2 uses), incentivising spending a use right before earning a replacement.
+- `score_board(board, powers)` is cached by `(board_bb, swap_uses, delete_uses)` and currently uses: empty cells, snake gradient, direction-aware monotonicity (rows follow snake direction), roughness (subtracted), merge potential, max tile log2, `log2(sum_tiles+1)`, legal move count, corner bonus when max tile is at `(0,0)`, and power-up value.
+- Power-up proximity is intentionally damped/gated: swap proximity starts at max tile `>=128`, delete proximity at `>=256`, each scaled by `0.25`, and proximity goes to `0` once unlock threshold is reached (`256`/`512`) so the heuristic does not carry phantom inventory.
 - Snake weight matrix puts upper-left corner at weight 16, zigzagging down to 1 at lower-left.
 
 **`bot.py`** — Async game loop
@@ -109,15 +114,17 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 `score_board` results are cached to avoid recomputing the same board position multiple times within and across game runs.
 
 **In-memory cache** (`strategy.py`):
-- `_TRANS_TABLE`: `{(board_bb, swap_uses, delete_uses) → score}`. Cleared (LRU-free eviction) when it reaches `_TRANS_CAP` (500 000 entries).
+- `_TRANS_TABLE`: `{(board_bb, swap_uses, delete_uses) → score}`. Normally cleared (LRU-free eviction) when it reaches `_TRANS_CAP` (500 000 entries).
 - `_NEW_ENTRIES`: same keys, only entries added in the current run — drained after each game and flushed to SQLite.
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
+- Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, `_TRANS_TABLE` is preserved and new lookups are not inserted into memory; they are still tracked in `_NEW_ENTRIES` and flushed to SQLite.
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
 - Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.
 - `board_bb` is stored as signed int64 (`_to_signed`/`_from_signed` helpers handle values > 2^63).
 - `load_version(version)` → dict loaded into `_TRANS_TABLE` at bot startup.
 - `save_entries(entries, version)` writes new rows after each game.
+- DB path can be overridden with `TRANS_DB_PATH` (default is `cache/transposition.db` in this repo).
 
 **Versioning** — **CRITICAL**:
 - `SCORE_BOARD_VERSION` in `strategy.py` must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
@@ -142,5 +149,24 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 - The site uses Svelte + Tailwind CSS with an OffscreenCanvas in a Web Worker. DOM inspection does not reveal tile values directly.
 - `add_init_script` runs before any page scripts, so the Worker constructor override is guaranteed to be in place before the game's Worker is created.
 - `_roughness` must guard `if v <= 0: continue` (not just `== 0`) because board values are never negative but the guard matters for correctness.
-- Monotonicity is penalty-based: take the minimum drop penalty across both traversal directions for each row/col, then negate. Do NOT sum both directions.
+- Monotonicity is penalty-based and mixed-direction: rows are direction-aware (must follow snake direction), columns still use the minimum penalty across both directions, then negate.
 - `new_game()` tries several button text variants and falls back to force-click + Escape to handle the post-game-over overlay.
+
+## Refactor Roadmap
+
+This section tracks active refactor phases so agents can align changes without re-discovering intent.
+
+### Phase 1 (low risk, in progress): typed actions + regression tests
+- Introduce typed action models in `strategy.py` (`MoveAction`, `SwapAction`, `DeleteAction`) and a new `best_action_obj(...)` API.
+- Keep `best_action(...)` tuple API for backward compatibility; it wraps typed actions.
+- Deterministic regression checks live in `tests/test_strategy_actions.py` (tuple back-compat + fixture action expectations).
+
+### Phase 2 (medium risk): evaluation decomposition
+- Split `score_board` into `extract_features(...)` + weighted scorer.
+- Keep transposition-key semantics stable and preserve current behavior behind tests.
+- Move heuristic weights to a central config object (still loaded in-process by default).
+
+### Phase 3 (higher leverage): cache/search modularization
+- Extract transposition-table behavior into a dedicated cache component with explicit policies (cap, preload, flush semantics).
+- Remove duplicated simulation/depth-schedule logic across scripts by introducing shared harness utilities.
+- Add CI quality gates (`ruff`, unit tests, targeted benchmark smoke checks) before larger search optimizations.

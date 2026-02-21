@@ -9,8 +9,62 @@ Key functions:
 """
 
 import math
+from dataclasses import dataclass
 
 DIRECTIONS = ["up", "down", "left", "right"]
+
+
+@dataclass(frozen=True)
+class MoveAction:
+    direction: str
+
+
+@dataclass(frozen=True)
+class SwapAction:
+    r1: int
+    c1: int
+    r2: int
+    c2: int
+
+
+@dataclass(frozen=True)
+class DeleteAction:
+    value: int
+    row: int
+    col: int
+
+
+Action = MoveAction | SwapAction | DeleteAction
+ActionTuple = tuple
+
+
+def action_to_tuple(action: Action | None) -> ActionTuple | None:
+    """Convert typed action objects to the legacy tuple action format."""
+    if action is None:
+        return None
+    if isinstance(action, MoveAction):
+        return ("move", action.direction)
+    if isinstance(action, SwapAction):
+        return ("swap", action.r1, action.c1, action.r2, action.c2)
+    if isinstance(action, DeleteAction):
+        return ("delete", action.value, action.row, action.col)
+    raise TypeError(f"Unknown action type: {type(action)!r}")
+
+
+def action_from_tuple(action: ActionTuple | None) -> Action | None:
+    """Convert legacy tuple actions to typed action objects."""
+    if action is None:
+        return None
+    kind = action[0]
+    if kind == "move":
+        return MoveAction(direction=action[1])
+    if kind == "swap":
+        _, r1, c1, r2, c2 = action
+        return SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
+    if kind == "delete":
+        _, value, row, col = action
+        return DeleteAction(value=value, row=row, col=col)
+    raise ValueError(f"Unknown action tuple kind: {kind!r}")
 
 # ── Transposition table ────────────────────────────────────────────────────────
 # Bump this string whenever heuristic weights or eval logic changes.
@@ -555,11 +609,11 @@ def _top_positions(board: list[list[int]], k: int = 6) -> list[tuple[int, int]]:
     return [(r, c) for _, r, c in tiles[:k]]
 
 
-def best_action(
+def best_action_obj(
     board: list[list[int]],
     powers: dict | None = None,
     depth: int = 4,
-) -> tuple | None:
+) -> Action | None:
     """Evaluate all available actions (moves + power-ups) and return the best.
 
     Return value is a tuple whose first element identifies the action:
@@ -576,7 +630,7 @@ def best_action(
     if powers is None:
         powers = {}
     best_val = float("-inf")
-    best_act: tuple | None = None
+    best_act: Action | None = None
 
     # ── Regular moves (powers unchanged through the tree) ─────────────────────
     for d in DIRECTIONS:
@@ -586,7 +640,7 @@ def best_action(
         val = _expectimax(nb, depth - 1, False, powers) + score_delta
         if val > best_val:
             best_val = val
-            best_act = ("move", d)
+            best_act = MoveAction(direction=d)
 
     # ── Swap two tiles (tree sees swap count decremented by 1) ────────────────
     if powers.get("swap", 0) > 0:
@@ -602,7 +656,7 @@ def best_action(
                 val = _expectimax(nb, depth - 1, False, powers_after)
                 if val > best_val:
                     best_val = val
-                    best_act = ("swap", r1, c1, r2, c2)
+                    best_act = SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
 
     # ── Delete tiles by value (tree sees delete count decremented by 1) ───────
     if powers.get("delete", 0) > 0:
@@ -621,14 +675,26 @@ def best_action(
             if val > best_val:
                 best_val = val
                 pos = next((r, c) for r in range(4) for c in range(4) if board[r][c] == v)
-                best_act = ("delete", v, pos[0], pos[1])
+                best_act = DeleteAction(value=v, row=pos[0], col=pos[1])
 
     return best_act
 
 
+def best_action(
+    board: list[list[int]],
+    powers: dict | None = None,
+    depth: int = 4,
+) -> ActionTuple | None:
+    """Back-compat wrapper returning tuple actions.
+
+    Prefer `best_action_obj` for new code.
+    """
+    return action_to_tuple(best_action_obj(board, powers=powers, depth=depth))
+
+
 def best_move(board: list[list[int]], depth: int = 4) -> str | None:
     """Backwards-compat wrapper: return only the direction string (no powers)."""
-    action = best_action(board, powers={}, depth=depth)
-    if action is None or action[0] != "move":
+    action = best_action_obj(board, powers={}, depth=depth)
+    if not isinstance(action, MoveAction):
         return None
-    return action[1]
+    return action.direction
