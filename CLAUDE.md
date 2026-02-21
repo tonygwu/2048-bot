@@ -106,16 +106,13 @@ Core runtime is centered on three files (`game.py`, `strategy.py`, `bot.py`) plu
 - Power-up execution identifies the three `button[class*=aspect-square]` elements and clicks them plus canvas tiles.
 - Score is read from DOM: `span.shrink-1.truncate` (first=score, second=best). Score briefly drops to 0 when the win overlay is visible — callers must track `best_score_seen`.
 
-**`strategy.py`** — Pure-Python Expectimax AI, no I/O
+**`strategy.py`** — Compatibility facade for modularized strategy code
 
-- `apply_move(board, direction)` → `(new_board, score_delta, changed)`. Does NOT place a new tile; that is done by the chance node.
-- `best_action_obj(board, powers, depth)` evaluates all regular moves plus swap/delete power-ups and returns typed actions: `MoveAction`, `SwapAction`, `DeleteAction`.
-- `best_action(board, powers, depth)` is the backwards-compatible tuple wrapper over `best_action_obj`: `("move", dir)`, `("swap", r1,c1,r2,c2)`, or `("delete", value, row, col)`.
-- `_expectimax(board, depth, is_max, powers)`: max nodes try all 4 directions; chance nodes place 2 (90%) or 4 (10%) in empty cells. When more than 6 cells are empty, cells are subsampled to cap branching. `powers` is threaded through unchanged (no power-ups are used within the tree).
-- Phase-2 eval decomposition: `extract_eval_features(board, powers)` computes raw features and `score_from_features(features, weights)` applies `EvalWeights`. `score_board` now delegates to these.
-- `score_board(board, powers)` is cached by `(board_bb, swap_uses, delete_uses)` and currently uses: empty cells, snake gradient, direction-aware monotonicity (rows follow snake direction), roughness (subtracted), merge potential, max tile log2, `log2(sum_tiles+1)`, legal move count, corner bonus when max tile is at `(0,0)`, and power-up value.
-- Power-up proximity is intentionally damped/gated: swap proximity starts at max tile `>=128`, delete proximity at `>=256`, each scaled by `0.25`, and proximity goes to `0` once unlock threshold is reached (`256`/`512`) so the heuristic does not carry phantom inventory.
-- Snake weight matrix puts upper-left corner at weight 16, zigzagging down to 1 at lower-left.
+- Keep importing from `strategy.py`; it re-exports the stable API while implementation lives in focused modules:
+- `strategy_core.py`: deterministic board mechanics (`apply_move`, `empty_cells`, `is_game_over`, `board_to_bb`, `DIRECTIONS`).
+- `strategy_actions.py`: typed actions (`MoveAction`, `SwapAction`, `DeleteAction`) + tuple compatibility helpers.
+- `strategy_eval.py`: eval features/scoring and transposition cache integration (`score_board`, `extract_eval_features`, `score_from_features`, cache load/drain/stats APIs).
+- `strategy_search.py`: adaptive depth, expectimax, and action selection (`auto_depth`, `_expectimax`, `best_action_obj`, `best_action`).
 
 ### Canonical evaluation metrics (`tests/evaluator.py`)
 
@@ -214,6 +211,6 @@ This section tracks active refactor phases so agents can align changes without r
 - Remove duplicated simulation/depth-schedule logic across scripts by introducing shared harness utilities (`sim_utils.py` done for tile-spawn path).
 - Add CI quality gates (`ruff`, unit tests, targeted benchmark smoke checks) before larger search optimizations.
 
-### Phase 4 (optional): structural decomposition
-- Split `strategy.py` into smaller modules (`actions`, `search`, `eval`) while preserving compatibility exports.
+### Phase 4 (in progress): structural decomposition
+- Split strategy internals into smaller modules (`strategy_actions.py`, `strategy_core.py`, `strategy_eval.py`, `strategy_search.py`) while preserving compatibility exports from `strategy.py`.
 - Keep fixture-driven regression tests as a hard gate for any behavioral drift.
