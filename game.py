@@ -283,18 +283,21 @@ async def read_state(page: Page) -> GameState:
           const scoreText = spans[0] ? (spans[0].textContent || '') : '';
           const bestText = spans[1] ? (spans[1].textContent || '') : '';
           const bodyText = document.body ? (document.body.innerText || '') : '';
-          const hasKeepGoingButtonVisible = Array.from(document.querySelectorAll('button'))
-            .some((b) => {
-              const text = (b.textContent || '').trim();
-              if (!/keep\\s*going/i.test(text)) return false;
-              const style = window.getComputedStyle(b);
-              return (
-                b.getClientRects().length > 0 &&
-                style.display !== 'none' &&
-                style.visibility !== 'hidden' &&
-                style.opacity !== '0'
-              );
-            });
+          const isVisible = (el) => {
+            const style = window.getComputedStyle(el);
+            return (
+              el.getClientRects().length > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.opacity !== '0'
+            );
+          };
+          const hasKeepGoingButtonVisible = Array.from(
+            document.querySelectorAll('button,[role=\"button\"],a,div,span')
+          ).some((el) => {
+            const text = (el.textContent || '').trim();
+            return /keep\\s*going/i.test(text) && isVisible(el);
+          });
           return {
             update,
             scoreText,
@@ -454,8 +457,10 @@ async def execute_delete(page: Page, row: int, col: int) -> None:
         await click_tile(page, row, col)
 
 
-async def dismiss_win_overlay(page: Page) -> None:
-    """Dismiss the 'You win!' overlay so the game can continue past 2048."""
+async def dismiss_win_overlay(page: Page) -> bool:
+    """Dismiss the 'You win!' overlay so the game can continue past 2048.
+    Returns True if a click attempt targeting keep-going controls was made.
+    """
     button_candidates = [
         page.get_by_role("button", name="Keep going!"),
         page.get_by_role("button", name="Keep going"),
@@ -473,16 +478,46 @@ async def dismiss_win_overlay(page: Page) -> None:
                     continue
                 await candidate.click(timeout=3000)
                 await asyncio.sleep(0.3)
-                return
+                return True
             except Exception:
                 try:
                     await candidate.click(force=True, timeout=1500)
                     await asyncio.sleep(0.3)
-                    return
+                    return True
                 except Exception:
                     pass
+    # Fallback: site variants may render clickable controls as non-button nodes.
+    clicked = await page.evaluate(
+        """
+        () => {
+          const isVisible = (el) => {
+            const style = window.getComputedStyle(el);
+            return (
+              el.getClientRects().length > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.opacity !== '0'
+            );
+          };
+          const els = Array.from(document.querySelectorAll('*'));
+          for (const el of els) {
+            const text = (el.textContent || '').trim();
+            if (!/^(keep\\s*going!?|continue!?)$/i.test(text)) continue;
+            if (!isVisible(el)) continue;
+            const target = el.closest('button,[role=\"button\"],a,div,span') || el;
+            target.click();
+            return true;
+          }
+          return false;
+        }
+        """
+    )
+    if clicked:
+        await asyncio.sleep(0.3)
+        return True
     await page.keyboard.press("Escape")
     await asyncio.sleep(0.3)
+    return False
 
 
 async def new_game(page: Page) -> None:

@@ -179,11 +179,11 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
             }
 
         # ── Win overlay (2048+) — dismiss and keep playing ────────────────────
-        # Guard: only dismiss once. The "You win" DOM element persists hidden
-        # after dismissal, so state.won stays True forever without this flag.
-        if state.won and not win_overlay_dismissed:
+        # Some site variants may not expose a reliable `won` flag in worker/DOM.
+        # Once 2048 is present, proactively try to click "Keep Going".
+        if max_tile >= 2048 and not win_overlay_dismissed:
             print(f"\n[Move {move_count}]  *** {max_tile} tile — dismissing win overlay ***")
-            await dismiss_win_overlay(page)
+            clicked = await dismiss_win_overlay(page)
             await asyncio.sleep(0.15)
             state_after_dismiss = await read_state(page)
             if state_after_dismiss.won:
@@ -192,9 +192,14 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                 if win_overlay_retry_count >= 8:
                     print(f"[Move {move_count}]  Win overlay retry cap reached; continuing anyway.")
                     win_overlay_dismissed = True
-            else:
+            elif clicked:
                 win_overlay_dismissed = True
                 win_overlay_retry_count = 0
+            else:
+                # No overlay signal and no click target found; keep trying briefly.
+                win_overlay_retry_count += 1
+                if win_overlay_retry_count >= 3:
+                    win_overlay_dismissed = True
             continue
 
         # ── Compute depth for this move ───────────────────────────────────────
