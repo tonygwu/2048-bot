@@ -352,20 +352,41 @@ async def execute_undo(page: Page) -> None:
 
 async def execute_undo_on_gameover(page: Page) -> None:
     """Click the Undo button on the game-over overlay to resume play from the previous state."""
-    btn = page.locator("button:has-text('Undo')")
-    # The game-over overlay may still be animating in (especially after a rapid
-    # second game-over right after an undo). Wait for the button to become
-    # visible before clicking; fall back to force-click if it stays hidden.
-    if await btn.count() > 0:
+    btns = page.locator("button:has-text('Undo')")
+    # The game-over overlay button can appear a moment after the final move.
+    # Wait briefly, then click a visible "Undo" button if present.
+    try:
+        await btns.first.wait_for(state="visible", timeout=2500)
+    except Exception:
+        pass
+
+    target = None
+    try:
+        count = await btns.count()
+    except Exception:
+        count = 0
+    for i in range(count):
+        cand = btns.nth(i)
         try:
-            await btn.first.wait_for(state="visible", timeout=3000)
-            await btn.first.click(timeout=3000)
+            if await cand.is_visible():
+                target = cand
+                break
+        except Exception:
+            continue
+
+    if target is not None:
+        try:
+            await target.click(timeout=3000)
         except Exception:
             try:
-                await btn.first.click(force=True, timeout=2000)
+                await target.click(force=True, timeout=2000)
             except Exception:
                 pass
         await asyncio.sleep(POWER_DELAY)
+        return
+
+    # Fallback: try the regular header power-up Undo if no overlay button found.
+    await execute_undo(page)
 
 
 async def execute_swap(page: Page, r1: int, c1: int, r2: int, c2: int) -> None:
