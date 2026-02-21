@@ -19,6 +19,22 @@ _DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "cache", "transpositi
 _ENV_DB_PATH = os.environ.get("TRANS_DB_PATH")
 DB_PATH = os.path.abspath(os.path.expanduser(_ENV_DB_PATH)) if _ENV_DB_PATH else _DEFAULT_DB_PATH
 
+_SQLITE_TIMEOUT_S = 30.0
+_SQLITE_BUSY_TIMEOUT_MS = 30_000
+_SCHEMA_READY = False
+
+_CREATE_ENTRIES_SQL = """
+    CREATE TABLE IF NOT EXISTS entries (
+        board_bb    INTEGER NOT NULL,
+        swap_uses   INTEGER NOT NULL,
+        delete_uses INTEGER NOT NULL,
+        version     TEXT    NOT NULL,
+        score       REAL    NOT NULL,
+        PRIMARY KEY (board_bb, swap_uses, delete_uses, version)
+    )
+"""
+_CREATE_VERSION_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_version ON entries(version)"
+
 
 # ── Signed-int helpers (SQLite stores INTEGER as signed 64-bit) ───────────────
 
@@ -34,24 +50,46 @@ def _from_signed(val: int) -> int:
 
 # ── DB init ───────────────────────────────────────────────────────────────────
 
-def _connect() -> sqlite3.Connection:
+def _set_common_pragmas(conn: sqlite3.Connection) -> None:
+    conn.execute(f"PRAGMA busy_timeout = {_SQLITE_BUSY_TIMEOUT_MS}")
+
+
+def _set_rw_pragmas(conn: sqlite3.Connection) -> None:
+    _set_common_pragmas(conn)
+    # WAL improves concurrent read/write behavior for multi-process workloads.
+    conn.execute("PRAGMA journal_mode = WAL").fetchone()
+    conn.execute("PRAGMA synchronous = NORMAL")
+
+
+def _connect_rw() -> sqlite3.Connection:
     db_dir = os.path.dirname(DB_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS entries (
-            board_bb    INTEGER NOT NULL,
-            swap_uses   INTEGER NOT NULL,
-            delete_uses INTEGER NOT NULL,
-            version     TEXT    NOT NULL,
-            score       REAL    NOT NULL,
-            PRIMARY KEY (board_bb, swap_uses, delete_uses, version)
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_version ON entries(version)")
-    conn.commit()
-    return conn
+    return sqlite3.connect(DB_PATH, timeout=_SQLITE_TIMEOUT_S)
+
+
+def _connect_ro() -> sqlite3.Connection:
+    return sqlite3.connect(
+        f"file:{DB_PATH}?mode=ro",
+        uri=True,
+        timeout=_SQLITE_TIMEOUT_S,
+    )
+
+
+def init_db() -> None:
+    """Initialize schema and connection mode once per process."""
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    conn = _connect_rw()
+    try:
+        _set_rw_pragmas(conn)
+        conn.execute(_CREATE_ENTRIES_SQL)
+        conn.execute(_CREATE_VERSION_INDEX_SQL)
+        conn.commit()
+    finally:
+        conn.close()
+    _SCHEMA_READY = True
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -61,12 +99,18 @@ def load_version(version: str) -> dict:
     (board_bb, swap_uses, delete_uses) → score.  Returns {} if DB is absent."""
     if not os.path.exists(DB_PATH):
         return {}
-    conn = _connect()
+    conn = _connect_ro()
     try:
-        rows = conn.execute(
-            "SELECT board_bb, swap_uses, delete_uses, score FROM entries WHERE version = ?",
-            (version,),
-        ).fetchall()
+        _set_common_pragmas(conn)
+        try:
+            rows = conn.execute(
+                "SELECT board_bb, swap_uses, delete_uses, score FROM entries WHERE version = ?",
+                (version,),
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
     finally:
         conn.close()
     return {
@@ -81,8 +125,10 @@ def save_entries(entries: dict, version: str) -> int:
     Returns the number of rows written."""
     if not entries:
         return 0
-    conn = _connect()
+    init_db()
+    conn = _connect_rw()
     try:
+        _set_rw_pragmas(conn)
         rows = [
             (_to_signed(bb), su, du, version, score)
             for (bb, su, du), score in entries.items()
@@ -102,11 +148,17 @@ def list_versions() -> dict:
     """Return {version: row_count} for all versions stored in the DB."""
     if not os.path.exists(DB_PATH):
         return {}
-    conn = _connect()
+    conn = _connect_ro()
     try:
-        rows = conn.execute(
-            "SELECT version, COUNT(*) FROM entries GROUP BY version"
-        ).fetchall()
+        _set_common_pragmas(conn)
+        try:
+            rows = conn.execute(
+                "SELECT version, COUNT(*) FROM entries GROUP BY version"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
     finally:
         conn.close()
     return {v: cnt for v, cnt in rows}
@@ -117,18 +169,24 @@ def get_all_states(version: str | None = None) -> list[tuple]:
     If version is None, return all versions."""
     if not os.path.exists(DB_PATH):
         return []
-    conn = _connect()
+    conn = _connect_ro()
     try:
-        if version is not None:
-            rows = conn.execute(
-                "SELECT board_bb, swap_uses, delete_uses, version, score "
-                "FROM entries WHERE version = ?",
-                (version,),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT board_bb, swap_uses, delete_uses, version, score FROM entries"
-            ).fetchall()
+        _set_common_pragmas(conn)
+        try:
+            if version is not None:
+                rows = conn.execute(
+                    "SELECT board_bb, swap_uses, delete_uses, version, score "
+                    "FROM entries WHERE version = ?",
+                    (version,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT board_bb, swap_uses, delete_uses, version, score FROM entries"
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return []
+            raise
     finally:
         conn.close()
     return [(_from_signed(bb), su, du, v, sc) for bb, su, du, v, sc in rows]
