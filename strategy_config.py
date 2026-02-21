@@ -20,12 +20,18 @@ class DepthPolicy:
     jammed_bonus: float = 0.35
     low_valid_bonus_threshold: int = 2
     low_valid_bonus: float = 0.25
+    # In open/mid-game boards, low legal-move count is often temporary noise.
+    # Damp the low-valid bonus to avoid over-escalating depth too early.
+    midgame_empties_threshold: int = 5
+    midgame_rough_damp_threshold: float = 0.9
+    midgame_low_valid_damp: float = 0.65
     surgery_empties_threshold: int = 3
     surgery_valid_threshold: int = 3
     surgery_rough_threshold: float = 0.9
     surgery_bonus: float = 0.40
     near_death_empties_threshold: int = 1
-    near_death_valid_threshold: int = 2
+    # Depth-6 should be rare: require only one legal move remaining.
+    near_death_valid_threshold: int = 1
     near_death_rough_threshold: float = 0.95
     near_death_max_log_threshold: float = 11.0
 

@@ -4,6 +4,10 @@ benchmark_depth.py — Backwards-compatible wrapper around tests/evaluator.py.
 This script is kept for compatibility with existing workflows.
 It delegates to the canonical evaluator so depth studies and heuristic
 studies use the same metric definitions.
+
+DEPRECATION NOTE:
+  Use tests/evaluator.py directly for all new experiments.
+  Keep this wrapper only for backward-compatible command usage.
 """
 
 from __future__ import annotations

@@ -51,6 +51,7 @@ pypy3.10 -m venv .venv
 .venv/bin/python tests/evaluator.py --suite depth_calibration --depths 2,3,4,5 --seeds 5 --moves 25
 
 # Compatibility wrapper (delegates to tests/evaluator.py depth_calibration suite)
+# Deprecated for new experiments: prefer tests/evaluator.py directly.
 .venv/bin/python benchmark_depth.py
 .venv/bin/python benchmark_depth.py --moves 15 --seeds 3         # quick pass
 .venv/bin/python benchmark_depth.py --depths 3,4,5,6 --seeds 8   # deeper comparison

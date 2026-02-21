@@ -45,6 +45,11 @@ def auto_depth(board: list[list[int]]) -> int:
         score += p.jammed_bonus
     if valid <= p.low_valid_bonus_threshold:
         score += p.low_valid_bonus
+        if (
+            empties >= p.midgame_empties_threshold
+            and rough_n >= p.midgame_rough_damp_threshold
+        ):
+            score -= p.midgame_low_valid_damp
     if (
         empties <= p.surgery_empties_threshold
         and valid <= p.surgery_valid_threshold
