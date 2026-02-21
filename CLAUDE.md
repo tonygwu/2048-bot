@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Setup
 
-On a fresh clone, create the virtual environment and install dependencies:
+On a fresh clone, create the virtual environment and install dependencies.
+Use PyPy by default for faster strategy/search performance:
 
 ```bash
-python3 -m venv .venv
+pypy3.10 -m venv .venv
 .venv/bin/pip install playwright pillow
 .venv/bin/playwright install chromium
 ```
