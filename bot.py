@@ -28,11 +28,11 @@ TARGET_TILE = 16384   # stop once this tile is reached
 # and the board has fewer empty cells so chance-node branching is cheaper.
 _DEPTH_SCHEDULE = [
     ( 512, 2),   # max_tile <  512 → depth 2
-    (1024, 3),   # max_tile < 1024 → depth 3
-    (2048, 4),   # max_tile < 2048 → depth 4
-    (4096, 5),   # max_tile < 4096 → depth 5
+    (2048, 3),   # max_tile < 2048 → depth 3
+    (4096, 4),   # max_tile < 4096 → depth 4
+    (8192, 5),   # max_tile < 8192 → depth 5
 ]
-_DEPTH_MAX = 6   # max_tile >= 4096
+_DEPTH_MAX = 6   # max_tile >= 8192
 
 
 def auto_depth(max_tile: int) -> int:
