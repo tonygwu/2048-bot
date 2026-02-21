@@ -104,6 +104,7 @@ def _fmt_eta(seconds: float) -> str:
 
 
 def cmd_recompute(
+    target_version: str,
     workers: int,
     write_chunk: int,
     progress_every: int,
@@ -112,8 +113,10 @@ def cmd_recompute(
     offset: int,
 ) -> None:
     """Recompute score_board for all states in the DB under SCORE_BOARD_VERSION."""
+    if not target_version:
+        raise ValueError("target_version must be non-empty")
     tasks = db.get_recompute_states(
-        current_version=SCORE_BOARD_VERSION,
+        current_version=target_version,
         only_missing_current=only_missing_current,
         limit=limit,
         offset=offset,
@@ -131,7 +134,7 @@ def cmd_recompute(
     mode = "missing-current only" if only_missing_current else "all states"
     limit_str = "none" if limit is None else f"{limit:,}"
     print(
-        f"Recomputing {total:,} unique states as version {SCORE_BOARD_VERSION!r} "
+        f"Recomputing {total:,} unique states as version {target_version!r} "
         f"(mode={mode}, offset={offset:,}, limit={limit_str}, workers={workers}, "
         f"write_chunk={write_chunk:,}, progress_every={progress_every:,})…"
     )
@@ -153,7 +156,7 @@ def cmd_recompute(
             entries[key] = score
 
             if len(entries) >= write_chunk:
-                written_total += db.save_entries(entries, SCORE_BOARD_VERSION)
+                written_total += db.save_entries(entries, target_version)
                 entries.clear()
 
             if processed % progress_every == 0 or processed == total:
@@ -168,7 +171,7 @@ def cmd_recompute(
                 )
 
         if entries:
-            written_total += db.save_entries(entries, SCORE_BOARD_VERSION)
+            written_total += db.save_entries(entries, target_version)
             entries.clear()
     finally:
         if workers != 1:
@@ -278,10 +281,13 @@ def main() -> None:
                         help="Max unique states to recompute (supports batching)")
     parser.add_argument("--offset", type=int, default=0,
                         help="Skip this many ordered unique states before recomputing")
+    parser.add_argument("--target-version", type=str, default=SCORE_BOARD_VERSION,
+                        help="Version label to write during --recompute (default: SCORE_BOARD_VERSION)")
     args = parser.parse_args()
 
     if args.recompute:
         cmd_recompute(
+            args.target_version.strip(),
             args.workers,
             args.write_chunk,
             args.progress_every,
