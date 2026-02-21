@@ -47,6 +47,22 @@ def reset_trans_cache() -> None:
     _TRANS_CACHE.reset_stats()
 
 
+def _clamp_uses(value: int) -> int:
+    """Power-up uses are capped by game design to [0, 2]."""
+    return max(0, min(2, int(value)))
+
+
+def normalize_powers(powers: dict | None) -> dict:
+    """Normalize power dictionary to bounded integer uses."""
+    if not powers:
+        return {"undo": 0, "swap": 0, "delete": 0}
+    return {
+        "undo": _clamp_uses(powers.get("undo", 0)),
+        "swap": _clamp_uses(powers.get("swap", 0)),
+        "delete": _clamp_uses(powers.get("delete", 0)),
+    }
+
+
 _SNAKE = [
     [16, 15, 14, 13],
     [9, 10, 11, 12],
@@ -168,8 +184,9 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
 
     stage = math.log2(max_tile)
     p = DEFAULT_POWERUP_POLICY
-    swap_uses = min(powers.get("swap", 0), p.max_swap_uses)
-    delete_uses = min(powers.get("delete", 0), p.max_delete_uses)
+    norm = normalize_powers(powers)
+    swap_uses = min(norm["swap"], p.max_swap_uses)
+    delete_uses = min(norm["delete"], p.max_delete_uses)
 
     prox_swap = 0.0
     prox_delete = 0.0
@@ -186,8 +203,7 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
 
 
 def extract_eval_features(board: list[list[int]], powers: dict | None = None) -> EvalFeatures:
-    if powers is None:
-        powers = {}
+    powers = normalize_powers(powers)
     empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
     max_val = max(board[r][c] for r in range(4) for c in range(4))
     tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
@@ -228,9 +244,8 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     If this function's logic or weights change, bump SCORE_BOARD_VERSION and run
     `populate_cache.py --recompute` so SQLite contains scores for the new version.
     """
-    if powers is None:
-        powers = {}
-    key = (board_to_bb(board), powers.get("swap", 0), powers.get("delete", 0))
+    powers = normalize_powers(powers)
+    key = (board_to_bb(board), powers["swap"], powers["delete"])
     cached = _TRANS_CACHE.get(key)
     if cached is not None:
         return cached

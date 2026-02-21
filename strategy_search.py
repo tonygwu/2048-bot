@@ -12,7 +12,7 @@ from strategy_actions import (
 )
 from strategy_config import DEFAULT_DEPTH_POLICY
 from strategy_core import DIRECTIONS, apply_move, empty_cells
-from strategy_eval import _roughness, score_board
+from strategy_eval import _roughness, normalize_powers, score_board
 
 
 def auto_depth(board: list[list[int]]) -> int:
@@ -69,8 +69,7 @@ def auto_depth(board: list[list[int]]) -> int:
 
 
 def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict | None = None) -> float:
-    if powers is None:
-        powers = {}
+    powers = normalize_powers(powers)
     if depth == 0:
         return score_board(board, powers)
 
@@ -118,8 +117,7 @@ def _top_positions(board: list[list[int]], k: int = 6) -> list[tuple[int, int]]:
 
 
 def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: int = 4) -> Action | None:
-    if powers is None:
-        powers = {}
+    powers = normalize_powers(powers)
     best_val = float("-inf")
     best_act: Action | None = None
 
@@ -132,7 +130,7 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
             best_val = val
             best_act = MoveAction(direction=d)
 
-    if powers.get("swap", 0) > 0:
+    if powers["swap"] > 0:
         powers_after = {**powers, "swap": powers["swap"] - 1}
         top = _top_positions(board, k=6)
         for i in range(len(top)):
@@ -147,7 +145,7 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
                     best_val = val
                     best_act = SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
 
-    if powers.get("delete", 0) > 0:
+    if powers["delete"] > 0:
         powers_after = {**powers, "delete": powers["delete"] - 1}
         empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
         candidates = [2, 4, 8]

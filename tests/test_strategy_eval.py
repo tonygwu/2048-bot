@@ -11,6 +11,7 @@ from strategy import (
     extract_eval_features,
     get_trans_stats,
     load_trans_table,
+    normalize_powers,
     reset_trans_stats,
     score_board,
     score_from_features,
@@ -69,6 +70,32 @@ class TestStrategyEval(unittest.TestCase):
             _ = score_board(board, powers)
             self.assertEqual(len(test_cache.table), before)
             self.assertGreaterEqual(len(test_cache.new_entries), 1)
+        finally:
+            strategy_eval._TRANS_CACHE = original_cache
+
+    def test_normalize_powers_caps_uses_to_two(self) -> None:
+        self.assertEqual(
+            normalize_powers({"undo": 7, "swap": 5, "delete": 3}),
+            {"undo": 2, "swap": 2, "delete": 2},
+        )
+        self.assertEqual(
+            normalize_powers({"undo": -1, "swap": -9, "delete": 1}),
+            {"undo": 0, "swap": 0, "delete": 1},
+        )
+
+    def test_score_board_cache_key_clamps_power_counts(self) -> None:
+        board, _ = _load_board("mid_game")
+        original_cache = strategy_eval._TRANS_CACHE
+        try:
+            test_cache = TranspositionCache(cap=100)
+            strategy_eval._TRANS_CACHE = test_cache
+            v1 = score_board(board, {"swap": 5, "delete": 9})
+            v2 = score_board(board, {"swap": 2, "delete": 2})
+            self.assertAlmostEqual(v1, v2, places=9)
+            self.assertEqual(len(test_cache.table), 1)
+            stats = get_trans_stats()
+            self.assertEqual(stats["misses"], 1)
+            self.assertGreaterEqual(stats["hits"], 1)
         finally:
             strategy_eval._TRANS_CACHE = original_cache
 

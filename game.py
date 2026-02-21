@@ -175,10 +175,13 @@ def _parse_powerups(data: dict) -> dict:
         pu = args[0].get("powerups", {})
         if not isinstance(pu, dict):
             return zero
+        def _clamp_uses(value: int) -> int:
+            return max(0, min(2, int(value)))
+
         return {
-            "undo":   int(pu.get("undo",                 {}).get("usesRemaining", 0)),
-            "swap":   int(pu.get("swapTwoTiles",         {}).get("usesRemaining", 0)),
-            "delete": int(pu.get("removeTilesByValue",   {}).get("usesRemaining", 0)),
+            "undo": _clamp_uses(pu.get("undo", {}).get("usesRemaining", 0)),
+            "swap": _clamp_uses(pu.get("swapTwoTiles", {}).get("usesRemaining", 0)),
+            "delete": _clamp_uses(pu.get("removeTilesByValue", {}).get("usesRemaining", 0)),
         }
     except Exception:
         return zero

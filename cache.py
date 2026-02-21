@@ -154,12 +154,17 @@ def save_entries(entries: dict, version: str) -> int:
     Returns the number of rows written."""
     if not entries:
         return 0
+
+    def _clamp_uses(v: int) -> int:
+        # Game semantics cap each power-up to [0, 2].
+        return max(0, min(2, int(v)))
+
     init_db()
     conn = _connect_rw()
     try:
         _set_rw_pragmas(conn)
         rows = [
-            (_to_signed(bb), su, du, version, score)
+            (_to_signed(bb), _clamp_uses(su), _clamp_uses(du), version, score)
             for (bb, su, du), score in entries.items()
         ]
         conn.executemany(
