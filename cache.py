@@ -184,7 +184,12 @@ def load_version(
         conn.close()
 
 
-def save_entries(entries: dict, version: str) -> int:
+def save_entries(
+    entries: dict,
+    version: str,
+    progress_cb: Callable[[int, int], None] | None = None,
+    batch_size: int = 100_000,
+) -> int:
     """Insert-or-replace *entries* into the DB under *version*.
     entries: {(board_bb, swap_uses, delete_uses): score}
     Returns the number of rows written."""
@@ -203,11 +208,22 @@ def save_entries(entries: dict, version: str) -> int:
             (_to_signed(bb), _clamp_uses(su), _clamp_uses(du), version, score)
             for (bb, su, du), score in entries.items()
         ]
-        conn.executemany(
-            "INSERT OR REPLACE INTO entries "
-            "(board_bb, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?)",
-            rows,
-        )
+        total = len(rows)
+        step = max(1, int(batch_size))
+        written = 0
+        for i in range(0, total, step):
+            chunk = rows[i:i + step]
+            conn.executemany(
+                "INSERT OR REPLACE INTO entries "
+                "(board_bb, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?)",
+                chunk,
+            )
+            written += len(chunk)
+            if progress_cb is not None:
+                try:
+                    progress_cb(written, total)
+                except Exception:
+                    pass
         conn.commit()
     finally:
         conn.close()

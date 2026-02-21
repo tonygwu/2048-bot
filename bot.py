@@ -376,6 +376,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
     pw, browser, page = await launch_browser(headless=headless)
 
     all_stats = []
+    pending_db_flushes: list[tuple[int, dict, int, int, float]] = []
     try:
         for game_num in range(1, num_games + 1):
             reset_trans_stats()
@@ -413,7 +414,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
                         **_depth_stats([]),
                     }
 
-            # ── Print cache stats for this game ───────────────────────────────
+            # ── Collect cache stats for this game ─────────────────────────────
             ts = get_trans_stats()
             total_lookups = ts["hits"] + ts["misses"]
             hit_rate = ts["hits"] / total_lookups * 100 if total_lookups else 0.0
@@ -421,16 +422,17 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
             # key may be evaluated more than once in a game.
             new_entries = drain_new_entries()
             unique_additions = sum(1 for k in new_entries if k not in cached)
-            print(f"\nCache stats (game {game_num}): "
-                  f"loaded={len(cached):,}  hits={ts['hits']:,}  misses={ts['misses']:,}  "
-                  f"hit_rate={hit_rate:.1f}%  unique_new={len(new_entries):,}  "
-                  f"table_size={len(cached) + unique_additions:,}")
-
-            # ── Flush new entries to DB ────────────────────────────────────────
+            pending_db_flushes.append(
+                (
+                    game_num,
+                    new_entries,
+                    ts["hits"],
+                    ts["misses"],
+                    hit_rate,
+                )
+            )
             if new_entries:
-                written = db.save_entries(new_entries, SCORE_BOARD_VERSION)
-                print(f"  Flushed {written:,} new entries to DB.")
-                cached.update(new_entries)   # keep local count accurate
+                cached.update(new_entries)   # keep local count accurate in memory
 
             stats["cache_hits"]   = ts["hits"]
             stats["cache_misses"] = ts["misses"]
@@ -483,6 +485,52 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
                     f"    {_cache_bucket_label(key):>10}: "
                     f"{rate:5.1f}%  (hits={hs:,}, misses={ms:,})"
                 )
+
+        # ── Persist cache updates after summary output ────────────────────────
+        total_flush_rows = 0
+        total_flush_seconds = 0.0
+        if pending_db_flushes:
+            print("\nPersisting cache updates to DB...")
+        for game_num, new_entries, hits, misses, hit_rate in pending_db_flushes:
+            print(
+                f"\nCache stats (game {game_num}): "
+                f"hits={hits:,}  misses={misses:,}  hit_rate={hit_rate:.1f}%  "
+                f"unique_new={len(new_entries):,}"
+            )
+            if not new_entries:
+                print("  No new entries to flush.")
+                continue
+
+            def _print_flush_progress(done: int, total: int) -> None:
+                width = 28
+                ratio = min(1.0, done / total) if total else 1.0
+                filled = int(width * ratio)
+                bar = "#" * filled + "-" * (width - filled)
+                print(
+                    f"\r  Flushing DB: [{bar}] {done:,}/{total:,} ({ratio*100:5.1f}%)",
+                    end="",
+                    flush=True,
+                )
+
+            t_flush = time.time()
+            written = db.save_entries(
+                new_entries,
+                SCORE_BOARD_VERSION,
+                progress_cb=_print_flush_progress,
+            )
+            flush_seconds = time.time() - t_flush
+            total_flush_rows += written
+            total_flush_seconds += flush_seconds
+            print()
+            print(
+                f"  Flushed {written:,} new entries to DB in {flush_seconds:.1f}s. "
+                f"(table_size={len(cached):,})"
+            )
+        if total_flush_rows > 0:
+            print(
+                f"\nDB flush complete: {total_flush_rows:,} rows written in "
+                f"{total_flush_seconds:.1f}s total."
+            )
 
         if not headless:
             print("\nKeeping browser open for 25s so you can see the final state…")
