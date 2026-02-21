@@ -5,14 +5,17 @@ import json
 import unittest
 from pathlib import Path
 
+import strategy
 from strategy import (
     EvalWeights,
     extract_eval_features,
     get_trans_stats,
+    load_trans_table,
     reset_trans_stats,
     score_board,
     score_from_features,
 )
+from transposition_cache import TranspositionCache
 
 
 BOARDS_DIR = Path(__file__).parent / "boards"
@@ -54,6 +57,20 @@ class TestStrategyEval(unittest.TestCase):
         stats = get_trans_stats()
         self.assertEqual(stats["misses"], 1)
         self.assertGreaterEqual(stats["hits"], 1)
+
+    def test_oversized_preload_preserves_table(self) -> None:
+        board, powers = _load_board("mid_game")
+        original_cache = strategy._TRANS_CACHE
+        try:
+            test_cache = TranspositionCache(cap=2)
+            strategy._TRANS_CACHE = test_cache
+            load_trans_table({(1, 0, 0): 1.0, (2, 0, 0): 2.0, (3, 0, 0): 3.0})
+            before = len(test_cache.table)
+            _ = score_board(board, powers)
+            self.assertEqual(len(test_cache.table), before)
+            self.assertGreaterEqual(len(test_cache.new_entries), 1)
+        finally:
+            strategy._TRANS_CACHE = original_cache
 
 
 if __name__ == "__main__":

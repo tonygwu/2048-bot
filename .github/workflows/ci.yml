@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Unit Tests
+        run: python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Benchmark Smoke
+        run: python benchmark_depth.py --moves 1 --seeds 1 --depths 2,3

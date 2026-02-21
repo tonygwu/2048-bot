@@ -11,6 +11,12 @@ Key functions:
 import math
 from dataclasses import dataclass
 from transposition_cache import TranspositionCache
+from strategy_config import (
+    DEFAULT_DEPTH_POLICY,
+    DEFAULT_EVAL_WEIGHTS,
+    DEFAULT_POWERUP_POLICY,
+    EvalWeights,
+)
 
 DIRECTIONS = ["up", "down", "left", "right"]
 
@@ -194,18 +200,9 @@ def is_game_over(board: list[list[int]]) -> bool:
 # - fullness / empty-cell count (chance branching + tactical tightness)
 # - mobility (how many legal directions remain)
 # - roughness (local value discontinuity; higher = messier board)
-_DEPTH_MIN = 2
-_DEPTH_MAX = 6
-_D_SOFT_MAX = 5
-_D_BASE = 0.55
-_D_W_MAX = 0.18
-_D_W_FULL = 1.10
-_D_W_BLOCKED = 0.75
-_D_W_ROUGH = 0.45
-
-
 def auto_depth(board: list[list[int]]) -> int:
     """Return adaptive expectimax depth from board-state features."""
+    p = DEFAULT_DEPTH_POLICY
     empties = 0
     max_tile = 0
     for r in range(4):
@@ -226,36 +223,45 @@ def auto_depth(board: list[list[int]]) -> int:
             valid += 1
     blocked = (4 - valid) / 3.0
 
-    rough_n = min(1.0, _roughness(board) / 36.0)
+    rough_n = min(1.0, _roughness(board) / p.rough_norm_divisor)
 
     score = (
-        _D_BASE
-        + _D_W_MAX * max_log
-        + _D_W_FULL * fullness
-        + _D_W_BLOCKED * blocked
-        + _D_W_ROUGH * rough_n
+        p.base
+        + p.w_max * max_log
+        + p.w_full * fullness
+        + p.w_blocked * blocked
+        + p.w_rough * rough_n
     )
 
     # Open boards: reduce depth because future is less constrained.
-    if empties >= 8:
-        score -= 0.90
+    if empties >= p.open_empties_threshold:
+        score -= p.open_penalty
     # Jammed boards: raise depth to look further for escapes.
-    elif empties <= 2:
-        score += 0.35
-    if valid <= 2:
-        score += 0.25
+    elif empties <= p.jammed_empties_threshold:
+        score += p.jammed_bonus
+    if valid <= p.low_valid_bonus_threshold:
+        score += p.low_valid_bonus
 
     # Extra tactical bump for low-empty, high-roughness boards that often
     # require "surgery" despite modest max-tile values.
-    if empties <= 3 and valid <= 3 and rough_n >= 0.9:
-        score += 0.40
+    if (
+        empties <= p.surgery_empties_threshold
+        and valid <= p.surgery_valid_threshold
+        and rough_n >= p.surgery_rough_threshold
+    ):
+        score += p.surgery_bonus
 
-    depth = max(_DEPTH_MIN, min(_D_SOFT_MAX, int(round(score))))
+    depth = max(p.min_depth, min(p.soft_max, int(round(score))))
 
     # Near-death board: allow depth 6 only when the board is both extremely
     # constrained and rough with a late-game max tile.
-    if empties <= 1 and valid <= 2 and rough_n >= 0.95 and max_log >= 11.0:
-        return _DEPTH_MAX
+    if (
+        empties <= p.near_death_empties_threshold
+        and valid <= p.near_death_valid_threshold
+        and rough_n >= p.near_death_rough_threshold
+        and max_log >= p.near_death_max_log_threshold
+    ):
+        return p.max_depth
 
     return depth
 
@@ -281,20 +287,6 @@ _SNAKE = [
 ]
 
 @dataclass(frozen=True)
-class EvalWeights:
-    empty: float = 270.0
-    gradient: float = 2.2
-    monotonicity: float = 47.0
-    roughness: float = 35.0
-    merge_potential: float = 65.0
-    max_tile_log: float = 120.0
-    sum_log: float = 140.0
-    mobility: float = 95.0
-    corner: float = 80.0
-    powerup: float = 1.0
-
-
-@dataclass(frozen=True)
 class EvalFeatures:
     empties: int
     gradient: float
@@ -306,9 +298,6 @@ class EvalFeatures:
     legal_moves: int
     corner_max_log: float
     powerup_value: float
-
-
-DEFAULT_EVAL_WEIGHTS = EvalWeights()
 
 # Row directions required by the snake pattern:
 #   rows 0, 2 → tiles should DECREASE left→right (weights 16↘13 and 8↘5)
@@ -325,14 +314,6 @@ _SNAKE_ROW_SHOULD_DECREASE = [True, False, True, False]
 # delete at 512).  Proximity is only counted while max_tile < unlock_tile;
 # once the threshold is passed the tree itself will see the earned use in
 # future boards — carrying a phantom 0.95 "inventory" forever was stale signal.
-_W_PU_BASE        =  40.0   # heuristic units per effective use, per log2(max_tile)
-_PU_DELETE_SCALE  =   2.0   # delete costs more to spend (removes ALL tiles of value)
-_MAX_SWAP_USES    =   2     # game caps storable swap uses at 2
-_MAX_DELETE_USES  =   2     # game caps storable delete uses at 2
-_SWAP_UNLOCK_TILE =  256    # creating a 256 tile earns a swap use
-_DELETE_UNLOCK_TILE = 512   # creating a 512 tile earns a delete use
-
-
 def _gradient(board: list[list[int]]) -> float:
     """G(s) = Σ _SNAKE[r][c] × L(tile). Anchors large tiles to the corner."""
     s = 0.0
@@ -476,23 +457,24 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
 
     stage = math.log2(max_tile)   # ≈ 1 early, ≈ 14 very late
 
-    swap_uses   = min(powers.get("swap",   0), _MAX_SWAP_USES)
-    delete_uses = min(powers.get("delete", 0), _MAX_DELETE_USES)
+    p = DEFAULT_POWERUP_POLICY
+    swap_uses = min(powers.get("swap", 0), p.max_swap_uses)
+    delete_uses = min(powers.get("delete", 0), p.max_delete_uses)
 
     # Dampen and gate proximity so early-game boards do not overvalue
     # hypothetical future unlocks over immediate survival/shape quality.
     prox_swap = 0.0
     prox_delete = 0.0
-    if max_tile >= 128 and swap_uses < _MAX_SWAP_USES:
-        prox_swap = 0.25 * _proximity_to_unlock(max_tile, _SWAP_UNLOCK_TILE)
-    if max_tile >= 256 and delete_uses < _MAX_DELETE_USES:
-        prox_delete = 0.25 * _proximity_to_unlock(max_tile, _DELETE_UNLOCK_TILE)
+    if max_tile >= p.prox_swap_min_tile and swap_uses < p.max_swap_uses:
+        prox_swap = p.prox_scale * _proximity_to_unlock(max_tile, p.swap_unlock_tile)
+    if max_tile >= p.prox_delete_min_tile and delete_uses < p.max_delete_uses:
+        prox_delete = p.prox_scale * _proximity_to_unlock(max_tile, p.delete_unlock_tile)
 
     effective_swaps   = swap_uses   + prox_swap
     effective_deletes = delete_uses + prox_delete
 
-    value_per_swap   = _W_PU_BASE * stage
-    value_per_delete = _W_PU_BASE * stage * _PU_DELETE_SCALE
+    value_per_swap = p.w_base * stage
+    value_per_delete = p.w_base * stage * p.delete_scale
 
     return value_per_swap * effective_swaps + value_per_delete * effective_deletes
 

@@ -60,6 +60,10 @@ python3 -m unittest tests/test_strategy_actions.py
 
 # Phase-2/3 regression checks (eval decomposition + cache policy)
 python3 -m unittest tests/test_strategy_eval.py tests/test_transposition_cache.py
+python3 -m unittest tests/test_auto_depth_policy.py
+
+# Lint (mirrors CI)
+ruff check .
 ```
 
 ### Board fixtures (`tests/boards/*.json`)
@@ -91,7 +95,7 @@ python3 -m unittest tests/test_strategy_eval.py tests/test_transposition_cache.p
 
 ## Architecture
 
-Core runtime is centered on three files (plus cache/test tooling), with no external game logic libraries:
+Core runtime is centered on three files (`game.py`, `strategy.py`, `bot.py`) plus config/cache/simulation utilities:
 
 **`game.py`** — Playwright async interface to https://play2048.co/
 
@@ -135,6 +139,12 @@ Use these definitions consistently when comparing strategy changes:
 - `play_one_game()` handles the full lifecycle: win overlay dismissal (guard flag so DOM element persisting hidden doesn't re-trigger), stuck-board detection (5 unchanged consecutive moves), and power-up tracking.
 - Prints board and status every 25 moves; announces depth bumps in auto mode.
 
+**`strategy_config.py`** — Centralized tuning knobs
+- `DepthPolicy`: adaptive-depth policy constants (open/jammed/surgery/near-death thresholds and weights).
+- `EvalWeights`: coefficients for the decomposed eval feature scorer.
+- `PowerUpPolicy`: power-up valuation/unlock/proximity constants.
+- `strategy.py` imports defaults from here so tuning changes are centralized.
+
 ## Transposition Table System
 
 `score_board` results are cached to avoid recomputing the same board position multiple times within and across game runs.
@@ -145,6 +155,11 @@ Use these definitions consistently when comparing strategy changes:
 - `drain_new_entries()` still returns newly-added keys for SQLite flush after each game.
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
 - Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, the preloaded table is preserved and new lookups are not inserted into the in-memory table; they are still tracked for DB flush.
+
+## Shared Simulation Utilities
+
+- `sim_utils.py` currently owns `place_random_tile(...)`.
+- Both `tests/run.py` and `benchmark_depth.py` use this helper to keep spawn semantics aligned.
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
 - Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.
@@ -194,7 +209,11 @@ This section tracks active refactor phases so agents can align changes without r
 - Keep transposition-key semantics stable and preserve current behavior behind tests.
 - Move heuristic weights to a central config object (still loaded in-process by default).
 
-### Phase 3 (higher leverage, in progress): cache/search modularization
+### Phase 3 (higher leverage, complete): cache/search modularization
 - Extract transposition-table behavior into a dedicated cache component with explicit policies (cap, preload, flush semantics).
 - Remove duplicated simulation/depth-schedule logic across scripts by introducing shared harness utilities (`sim_utils.py` done for tile-spawn path).
 - Add CI quality gates (`ruff`, unit tests, targeted benchmark smoke checks) before larger search optimizations.
+
+### Phase 4 (optional): structural decomposition
+- Split `strategy.py` into smaller modules (`actions`, `search`, `eval`) while preserving compatibility exports.
+- Keep fixture-driven regression tests as a hard gate for any behavioral drift.
