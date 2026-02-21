@@ -17,7 +17,10 @@ Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime as dt
+import hashlib
+import importlib
 import json
 import math
 import random
@@ -31,16 +34,6 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from strategy import (
-    apply_delete,
-    apply_move,
-    apply_swap,
-    best_action,
-    get_trans_stats,
-    is_game_over,
-    reset_trans_stats,
-    score_board,
-)
 from sim_utils import place_random_tile
 
 
@@ -49,6 +42,7 @@ DEFAULT_SEEDS = 30
 DEFAULT_DEPTHS = [3, 4, 5]
 DEFAULT_BOOTSTRAPS = 400
 DEFAULT_AB_PERMUTATIONS = 2000
+DEFAULT_MODULE = "strategy"
 
 
 # Backwards-compatible board suite for depth tuning (folded from benchmark_depth.py).
@@ -113,6 +107,18 @@ class Fixture:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class StrategyFns:
+    apply_delete: object
+    apply_move: object
+    apply_swap: object
+    best_action: object
+    get_trans_stats: object
+    is_game_over: object
+    reset_trans_stats: object
+    score_board: object
+
+
 def _parse_depths(raw: str) -> list[int]:
     vals = [int(x.strip()) for x in raw.split(",") if x.strip()]
     if not vals:
@@ -168,13 +174,13 @@ def _load_fixture_suite(suite: str, selected_names: set[str] | None = None) -> l
     return fixtures
 
 
-def _load_existing_jsonl(path: str | None) -> tuple[set[tuple[int, str, int]], list[dict]]:
+def _load_existing_jsonl(path: str | None) -> tuple[set[tuple[str, int, str, int]], list[dict]]:
     if not path:
         return set(), []
     p = Path(path)
     if not p.exists():
         return set(), []
-    completed: set[tuple[int, str, int]] = set()
+    completed: set[tuple[str, int, str, int]] = set()
     rows: list[dict] = []
     with p.open() as f:
         for line in f:
@@ -186,9 +192,96 @@ def _load_existing_jsonl(path: str | None) -> tuple[set[tuple[int, str, int]], l
             except json.JSONDecodeError:
                 continue
             if all(k in row for k in ("depth", "fixture", "seed")):
-                completed.add((int(row["depth"]), str(row["fixture"]), int(row["seed"])))
+                completed.add(
+                    (
+                        str(row.get("module_name", DEFAULT_MODULE)),
+                        int(row["depth"]),
+                        str(row["fixture"]),
+                        int(row["seed"]),
+                    )
+                )
             rows.append(row)
     return completed, rows
+
+
+_STRATEGY_FN_CACHE: dict[str, StrategyFns] = {}
+
+
+def _load_strategy_fns(module_name: str) -> StrategyFns:
+    cached = _STRATEGY_FN_CACHE.get(module_name)
+    if cached is not None:
+        return cached
+    module = importlib.import_module(module_name)
+    required = [
+        "apply_delete",
+        "apply_move",
+        "apply_swap",
+        "best_action",
+        "get_trans_stats",
+        "is_game_over",
+        "reset_trans_stats",
+        "score_board",
+    ]
+    missing = [name for name in required if not hasattr(module, name)]
+    if missing:
+        raise AttributeError(f"module {module_name!r} missing required symbols: {missing}")
+    fns = StrategyFns(
+        apply_delete=getattr(module, "apply_delete"),
+        apply_move=getattr(module, "apply_move"),
+        apply_swap=getattr(module, "apply_swap"),
+        best_action=getattr(module, "best_action"),
+        get_trans_stats=getattr(module, "get_trans_stats"),
+        is_game_over=getattr(module, "is_game_over"),
+        reset_trans_stats=getattr(module, "reset_trans_stats"),
+        score_board=getattr(module, "score_board"),
+    )
+    _STRATEGY_FN_CACHE[module_name] = fns
+    return fns
+
+
+def _fixtures_fingerprint(fixtures: list[Fixture]) -> str:
+    payload = [
+        {
+            "name": fx.name,
+            "board": fx.board,
+            "score": fx.score,
+            "powers": fx.powers,
+            "description": fx.description,
+        }
+        for fx in fixtures
+    ]
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _manifest_path(jsonl_out: str) -> Path:
+    p = Path(jsonl_out)
+    return p.with_suffix(p.suffix + ".manifest.json")
+
+
+def _build_manifest(
+    *,
+    suite: str,
+    boards: set[str] | None,
+    depths: list[int],
+    moves: int,
+    seeds: int,
+    seed_start: int,
+    no_random: bool,
+    fixtures: list[Fixture],
+    module_name: str,
+) -> dict:
+    return {
+        "suite": suite,
+        "boards": sorted(boards) if boards else "all",
+        "depths": depths,
+        "moves": moves,
+        "seeds": seeds,
+        "seed_start": seed_start,
+        "no_random": no_random,
+        "module_name": module_name,
+        "fixtures_fingerprint": _fixtures_fingerprint(fixtures),
+    }
 
 
 def _git_sha() -> str:
@@ -276,11 +369,13 @@ def _paired_permutation_test(
 
 def _simulate_one(
     fixture: Fixture,
+    module_name: str,
     depth: int,
     n_moves: int,
     seed: int,
     no_random: bool,
 ) -> dict:
+    fns = _load_strategy_fns(module_name)
     rng = random.Random(seed)
     board = [row[:] for row in fixture.board]
     score = int(fixture.score)
@@ -290,14 +385,14 @@ def _simulate_one(
     think_ms_total = 0.0
     action_counts = {"move": 0, "swap": 0, "delete": 0}
     think_samples: list[float] = []
-    reset_trans_stats()
+    fns.reset_trans_stats()
 
     for _ in range(n_moves):
-        if is_game_over(board):
+        if fns.is_game_over(board):
             break
 
         t0 = time.perf_counter()
-        action = best_action(board, powers, depth=depth)
+        action = fns.best_action(board, powers, depth=depth)
         think_ms = (time.perf_counter() - t0) * 1000.0
         think_ms_total += think_ms
         think_samples.append(think_ms)
@@ -310,7 +405,7 @@ def _simulate_one(
 
         if kind == "move":
             _, direction = action
-            nb, delta, changed = apply_move(board, direction)
+            nb, delta, changed = fns.apply_move(board, direction)
             if not changed:
                 break
             board = nb
@@ -319,14 +414,14 @@ def _simulate_one(
                 board = place_random_tile(board, rng)
         elif kind == "swap":
             _, r1, c1, r2, c2 = action
-            board = apply_swap(board, r1, c1, r2, c2)
+            board = fns.apply_swap(board, r1, c1, r2, c2)
             powers = dict(powers)
             powers["swap"] = max(0, powers.get("swap", 0) - 1)
             if not no_random:
                 board = place_random_tile(board, rng)
         elif kind == "delete":
             _, value, _, _ = action
-            board = apply_delete(board, value)
+            board = fns.apply_delete(board, value)
             powers = dict(powers)
             powers["delete"] = max(0, powers.get("delete", 0) - 1)
             if not no_random:
@@ -337,19 +432,19 @@ def _simulate_one(
         moves += 1
 
     max_tile = max(v for row in board for v in row)
-    cache_stats = get_trans_stats()
+    cache_stats = fns.get_trans_stats()
     cache_total = cache_stats["hits"] + cache_stats["misses"]
     cache_hit_rate = cache_stats["hits"] * 100.0 / cache_total if cache_total else 0.0
     return {
         "moves": moves,
         "score": score,
         "max_tile": max_tile,
-        "game_over": is_game_over(board),
+        "game_over": fns.is_game_over(board),
         "survived_to_cap": moves >= n_moves,
         "reach2048": max_tile >= 2048,
         "reach4096": max_tile >= 4096,
         "reach8192": max_tile >= 8192,
-        "final_eval": score_board(board, powers),
+        "final_eval": fns.score_board(board, powers),
         "think_ms_total": think_ms_total,
         "think_ms_samples": think_samples,
         "think_ms_mean": think_ms_total / max(1, moves),
@@ -402,6 +497,25 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
     }
 
 
+def _simulate_task(task: dict) -> tuple[int, str, int, dict]:
+    fx = Fixture(
+        name=task["fixture"]["name"],
+        board=task["fixture"]["board"],
+        score=task["fixture"]["score"],
+        powers=task["fixture"]["powers"],
+        description=task["fixture"].get("description", ""),
+    )
+    run = _simulate_one(
+        fixture=fx,
+        module_name=task["module_name"],
+        depth=task["depth"],
+        n_moves=task["n_moves"],
+        seed=task["seed"],
+        no_random=task["no_random"],
+    )
+    return task["depth"], fx.name, task["seed"], run
+
+
 def evaluate_suite(
     fixtures: list[Fixture],
     depths: list[int],
@@ -409,6 +523,8 @@ def evaluate_suite(
     n_seeds: int,
     seed_start: int,
     no_random: bool,
+    module_name: str = DEFAULT_MODULE,
+    jobs: int = 1,
     progress_every: int = 5,
     bootstrap_count: int = DEFAULT_BOOTSTRAPS,
     jsonl_out: str | None = None,
@@ -420,14 +536,21 @@ def evaluate_suite(
     per_fixture_depth: dict[int, dict[str, dict]] = {}
     per_fixture_runs: dict[int, dict[str, list[dict]]] = {}
 
-    existing_completed: set[tuple[int, str, int]] = set()
+    existing_completed: set[tuple[str, int, str, int]] = set()
     existing_rows: list[dict] = []
-    existing_row_by_key: dict[tuple[int, str, int], dict] = {}
+    existing_row_by_key: dict[tuple[str, int, str, int], dict] = {}
     if resume and jsonl_out:
         existing_completed, existing_rows = _load_existing_jsonl(jsonl_out)
         for r in existing_rows:
             if all(k in r for k in ("depth", "fixture", "seed")):
-                existing_row_by_key[(int(r["depth"]), str(r["fixture"]), int(r["seed"]))] = r
+                existing_row_by_key[
+                    (
+                        str(r.get("module_name", DEFAULT_MODULE)),
+                        int(r["depth"]),
+                        str(r["fixture"]),
+                        int(r["seed"]),
+                    )
+                ] = r
         if existing_completed:
             print(f"[status] resume enabled: found {len(existing_completed)} completed runs in JSONL")
 
@@ -445,24 +568,22 @@ def evaluate_suite(
     completed_units = 0
     total_start = time.perf_counter()
     rows_since_checkpoint = 0
-    for depth_idx, depth in enumerate(depths, start=1):
-        print(f"[status] depth {depth} ({depth_idx}/{len(depths)}) starting...")
-        depth_start = time.perf_counter()
-        per_fixture_depth[depth] = {}
-        per_fixture_runs[depth] = {}
-        all_runs: list[dict] = []
+    task_specs: list[dict] = []
+    ordered_keys: list[tuple[int, str, int]] = []
+    results_by_key: dict[tuple[int, str, int], dict] = {}
 
-        for fx_idx, fx in enumerate(fixtures, start=1):
-            print(f"[status]   fixture {fx.name} ({fx_idx}/{len(fixtures)})")
-            runs: list[dict] = []
+    for depth in depths:
+        for fx in fixtures:
             for i in range(n_seeds):
                 seed = seed_start + i
-                key = (depth, fx.name, seed)
+                key = (module_name, depth, fx.name, seed)
+                public_key = (depth, fx.name, seed)
+                ordered_keys.append(public_key)
                 if key in existing_completed:
                     match = existing_row_by_key.get(key)
                     if match is None:
                         continue
-                    run = {
+                    results_by_key[public_key] = {
                         "moves": match["moves"],
                         "score": match["score"],
                         "max_tile": match["max_tile"],
@@ -480,59 +601,116 @@ def evaluate_suite(
                         "cache_hit_rate": match.get("cache_hit_rate", 0.0),
                         "actions": match["actions"],
                     }
+                    completed_units += 1
                 else:
-                    run = _simulate_one(fx, depth, n_moves, seed, no_random)
-                runs.append(run)
-                if jsonl_path:
-                    if key not in existing_completed:
-                        row = {
+                    task_specs.append(
+                        {
+                            "module_name": module_name,
                             "depth": depth,
-                            "fixture": fx.name,
+                            "fixture": {
+                                "name": fx.name,
+                                "board": [row[:] for row in fx.board],
+                                "score": fx.score,
+                                "powers": dict(fx.powers),
+                                "description": fx.description,
+                            },
+                            "n_moves": n_moves,
                             "seed": seed,
-                            **run,
+                            "no_random": no_random,
                         }
-                        with jsonl_path.open("a") as f:
-                            f.write(json.dumps(row) + "\n")
-                        rows_since_checkpoint += 1
-                completed_units += 1
-                elapsed = time.perf_counter() - total_start
-                rate = completed_units / elapsed if elapsed > 0 else 0.0
-                remaining = total_units - completed_units
-                eta = remaining / rate if rate > 0 else float("inf")
-                if (i + 1) % progress_every == 0 or (i + 1) == n_seeds:
-                    print(
-                        f"[status]     seeds {i + 1}/{n_seeds} "
-                        f"(latest score={run['score']}, max_tile={run['max_tile']}) "
-                        f"overall={completed_units}/{total_units} eta={_format_eta(eta)}"
                     )
 
-                if checkpoint_path and rows_since_checkpoint >= checkpoint_every:
-                    checkpoint = {
-                        "meta": {
-                            "git_sha": _git_sha(),
-                            "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
-                            "incomplete": True,
-                        },
-                        "progress": {
-                            "completed_units": completed_units,
-                            "total_units": total_units,
-                            "elapsed_seconds": elapsed,
-                            "eta_seconds": eta if math.isfinite(eta) else None,
-                        },
-                        "summary_so_far": summary_rows,
-                    }
-                    checkpoint_path.write_text(json.dumps(checkpoint, indent=2))
-                    rows_since_checkpoint = 0
+    if completed_units:
+        print(f"[status] preloaded {completed_units}/{total_units} completed runs from resume data")
+
+    def _on_result(depth: int, fixture_name: str, seed: int, run: dict) -> None:
+        nonlocal completed_units, rows_since_checkpoint
+        pk = (depth, fixture_name, seed)
+        results_by_key[pk] = run
+        if jsonl_path:
+            row = {
+                "module_name": module_name,
+                "depth": depth,
+                "fixture": fixture_name,
+                "seed": seed,
+                **run,
+            }
+            with jsonl_path.open("a") as f:
+                f.write(json.dumps(row) + "\n")
+            rows_since_checkpoint += 1
+
+        completed_units += 1
+        elapsed = time.perf_counter() - total_start
+        rate = completed_units / elapsed if elapsed > 0 else 0.0
+        remaining = total_units - completed_units
+        eta = remaining / rate if rate > 0 else float("inf")
+        if completed_units % progress_every == 0 or completed_units == total_units:
+            print(
+                f"[status] completed {completed_units}/{total_units} "
+                f"latest=({fixture_name},d{depth},seed={seed},score={run['score']}) "
+                f"eta={_format_eta(eta)}"
+            )
+
+        if checkpoint_path and rows_since_checkpoint >= checkpoint_every:
+            checkpoint = {
+                "meta": {
+                    "git_sha": _git_sha(),
+                    "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "incomplete": True,
+                },
+                "progress": {
+                    "completed_units": completed_units,
+                    "total_units": total_units,
+                    "elapsed_seconds": elapsed,
+                    "eta_seconds": eta if math.isfinite(eta) else None,
+                },
+                "summary_so_far": summary_rows,
+            }
+            checkpoint_path.write_text(json.dumps(checkpoint, indent=2))
+            rows_since_checkpoint = 0
+
+    if task_specs:
+        print(
+            f"[status] executing {len(task_specs)} new runs with jobs={jobs} "
+            f"(module={module_name})"
+        )
+        if jobs > 1:
+            try:
+                with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as ex:
+                    futs = [ex.submit(_simulate_task, task) for task in task_specs]
+                    for fut in concurrent.futures.as_completed(futs):
+                        depth, fixture_name, seed, run = fut.result()
+                        _on_result(depth, fixture_name, seed, run)
+            except (PermissionError, OSError) as e:
+                print(f"[status] multiprocessing unavailable ({e}); falling back to jobs=1")
+                for task in task_specs:
+                    depth, fixture_name, seed, run = _simulate_task(task)
+                    _on_result(depth, fixture_name, seed, run)
+        else:
+            for task in task_specs:
+                depth, fixture_name, seed, run = _simulate_task(task)
+                _on_result(depth, fixture_name, seed, run)
+
+    # Build aggregate structures in deterministic order.
+    for depth in depths:
+        per_fixture_depth[depth] = {}
+        per_fixture_runs[depth] = {}
+        all_runs: list[dict] = []
+        for fx in fixtures:
+            runs: list[dict] = []
+            for i in range(n_seeds):
+                seed = seed_start + i
+                pk = (depth, fx.name, seed)
+                if pk in results_by_key:
+                    runs.append(results_by_key[pk])
             fx_agg = _aggregate(runs, bootstrap_count=bootstrap_count)
             per_fixture_depth[depth][fx.name] = fx_agg
             per_fixture_runs[depth][fx.name] = runs
             all_runs.extend(runs)
-
         row = {"depth": depth, **_aggregate(all_runs, bootstrap_count=bootstrap_count)}
         summary_rows.append(row)
-        elapsed = time.perf_counter() - depth_start
         print(
-            f"[status] depth {depth} complete in {elapsed:.1f}s "
+            f"[status] depth {depth} summary "
             f"(avg_score={row['avg_score']:.1f}, avg_think_ms={row['avg_think_ms']:.2f})"
         )
 
@@ -660,6 +838,10 @@ def main() -> None:
     parser.add_argument("--suite", choices=["fixtures", "depth_calibration"], default="fixtures")
     parser.add_argument("--boards", default=None, help="Comma-separated fixture names to include (default: all)")
     parser.add_argument("--depths", default=",".join(str(d) for d in DEFAULT_DEPTHS))
+    parser.add_argument("--module", default=DEFAULT_MODULE, help=f"Strategy module to evaluate (default: {DEFAULT_MODULE})")
+    parser.add_argument("--baseline-module", default=None, help="Baseline strategy module for module-vs-module comparison")
+    parser.add_argument("--candidate-module", default=None, help="Candidate strategy module for module-vs-module comparison")
+    parser.add_argument("--jobs", type=int, default=1, help="Parallel worker processes for simulation runs (default: 1)")
     parser.add_argument("--moves", type=int, default=DEFAULT_MOVES)
     parser.add_argument("--seeds", type=int, default=DEFAULT_SEEDS)
     parser.add_argument("--seed-start", type=int, default=0)
@@ -710,6 +892,8 @@ def main() -> None:
 
     if args.moves <= 0:
         parser.error("--moves must be > 0")
+    if args.jobs <= 0:
+        parser.error("--jobs must be > 0")
     if args.seeds <= 0:
         parser.error("--seeds must be > 0")
     if args.progress_every <= 0:
@@ -722,6 +906,8 @@ def main() -> None:
         parser.error("--ab-permutations must be > 0")
     if args.resume and not args.jsonl_out:
         parser.error("--resume requires --jsonl-out")
+    if args.candidate_module and args.resume:
+        parser.error("--resume is not supported with --candidate-module compare mode")
 
     try:
         depths = _parse_depths(args.depths)
@@ -735,13 +921,51 @@ def main() -> None:
     except ValueError as e:
         parser.error(str(e))
 
+    # Validate strategy module(s) up front.
+    try:
+        _load_strategy_fns(args.module)
+        if args.baseline_module:
+            _load_strategy_fns(args.baseline_module)
+        if args.candidate_module:
+            _load_strategy_fns(args.candidate_module)
+    except Exception as e:
+        parser.error(f"failed to import strategy module(s): {e}")
+
     _print_metric_glossary()
     print()
 
     print(
         f"[status] starting evaluator: suite={args.suite} fixtures={len(fixtures)} "
-        f"depths={depths} moves={args.moves} seeds={args.seeds} seed_start={args.seed_start}"
+        f"depths={depths} moves={args.moves} seeds={args.seeds} seed_start={args.seed_start} "
+        f"module={args.module} jobs={args.jobs}"
     )
+
+    # Manifest validation / setup for resume-safe runs.
+    if args.jsonl_out:
+        manifest = _build_manifest(
+            suite=args.suite,
+            boards=selected_names,
+            depths=depths,
+            moves=args.moves,
+            seeds=args.seeds,
+            seed_start=args.seed_start,
+            no_random=args.no_random,
+            fixtures=fixtures,
+            module_name=args.module,
+        )
+        mpath = _manifest_path(args.jsonl_out)
+        if args.resume:
+            if not mpath.exists():
+                parser.error(f"--resume requested but manifest missing: {mpath}")
+            prior = json.loads(mpath.read_text())
+            if prior != manifest:
+                parser.error(
+                    "--resume manifest mismatch; run config changed. "
+                    f"expected={prior} current={manifest}"
+                )
+        else:
+            mpath.parent.mkdir(parents=True, exist_ok=True)
+            mpath.write_text(json.dumps(manifest, indent=2))
 
     rows, per_fx, per_runs = evaluate_suite(
         fixtures=fixtures,
@@ -750,6 +974,8 @@ def main() -> None:
         n_seeds=args.seeds,
         seed_start=args.seed_start,
         no_random=args.no_random,
+        module_name=args.module,
+        jobs=args.jobs,
         progress_every=args.progress_every,
         bootstrap_count=args.bootstraps,
         jsonl_out=args.jsonl_out,
@@ -821,6 +1047,94 @@ def main() -> None:
             f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={p_value:.4f}"
         )
 
+    module_compare_result = None
+    if args.candidate_module:
+        baseline_module = args.baseline_module or args.module
+        print(
+            f"\n[status] module compare: baseline={baseline_module} "
+            f"candidate={args.candidate_module}"
+        )
+        if baseline_module == args.module:
+            base_rows = rows
+            base_runs = per_runs
+        else:
+            base_rows, _, base_runs = evaluate_suite(
+                fixtures=fixtures,
+                depths=depths,
+                n_moves=args.moves,
+                n_seeds=args.seeds,
+                seed_start=args.seed_start,
+                no_random=args.no_random,
+                module_name=baseline_module,
+                jobs=args.jobs,
+                progress_every=args.progress_every,
+                bootstrap_count=args.bootstraps,
+                jsonl_out=None,
+                resume=False,
+                checkpoint_out=None,
+                checkpoint_every=args.checkpoint_every,
+            )
+        cand_rows, _, cand_runs = evaluate_suite(
+            fixtures=fixtures,
+            depths=depths,
+            n_moves=args.moves,
+            n_seeds=args.seeds,
+            seed_start=args.seed_start,
+            no_random=args.no_random,
+            module_name=args.candidate_module,
+            jobs=args.jobs,
+            progress_every=args.progress_every,
+            bootstrap_count=args.bootstraps,
+            jsonl_out=None,
+            resume=False,
+            checkpoint_out=None,
+            checkpoint_every=args.checkpoint_every,
+        )
+        print()
+        _print_summary_table(base_rows, title=f"Baseline Module Summary ({baseline_module})")
+        print()
+        _print_summary_table(cand_rows, title=f"Candidate Module Summary ({args.candidate_module})")
+
+        deltas: list[float] = []
+        metric_key = args.ab_metric
+        for d in depths:
+            for fx in fixtures:
+                b_runs = base_runs[d][fx.name]
+                c_runs = cand_runs[d][fx.name]
+                for i in range(min(len(b_runs), len(c_runs))):
+                    deltas.append(c_runs[i][metric_key] - b_runs[i][metric_key])
+        mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+        ci_lo, ci_hi = _bootstrap_mean_ci(deltas, n_bootstrap=args.bootstraps, seed=args.seed_start + 41)
+        p_value = _paired_permutation_test(
+            deltas,
+            n_permutations=args.ab_permutations,
+            seed=args.seed_start + 53,
+        )
+        win_rate = sum(1 for x in deltas if x > 0) * 100.0 / max(1, len(deltas))
+        loss_rate = sum(1 for x in deltas if x < 0) * 100.0 / max(1, len(deltas))
+        module_compare_result = {
+            "baseline_module": baseline_module,
+            "candidate_module": args.candidate_module,
+            "metric": metric_key,
+            "paired_samples": len(deltas),
+            "mean_delta": mean_delta,
+            "mean_delta_ci95": [ci_lo, ci_hi],
+            "win_rate_pct": win_rate,
+            "loss_rate_pct": loss_rate,
+            "p_value": p_value,
+            "permutations": args.ab_permutations,
+        }
+        print("\nModule A/B Comparison")
+        print(
+            f"  baseline={baseline_module} candidate={args.candidate_module} "
+            f"metric={metric_key} samples={len(deltas)}"
+        )
+        print(
+            f"  mean_delta={mean_delta:+.2f} "
+            f"ci95=[{ci_lo:+.2f}, {ci_hi:+.2f}] "
+            f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={p_value:.4f}"
+        )
+
     if args.json_out:
         payload = {
             "meta": {
@@ -835,6 +1149,10 @@ def main() -> None:
                 "seeds": args.seeds,
                 "seed_start": args.seed_start,
                 "no_random": args.no_random,
+                "module": args.module,
+                "jobs": args.jobs,
+                "baseline_module": args.baseline_module,
+                "candidate_module": args.candidate_module,
                 "bootstraps": args.bootstraps,
                 "progress_every": args.progress_every,
                 "ab_depths": args.ab_depths,
@@ -847,6 +1165,7 @@ def main() -> None:
             "summary": rows,
             "per_fixture": per_fx,
             "ab_result": ab_result,
+            "module_compare_result": module_compare_result,
             "jsonl_out": args.jsonl_out,
         }
         Path(args.json_out).write_text(json.dumps(payload, indent=2))

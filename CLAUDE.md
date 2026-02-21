@@ -70,6 +70,8 @@ python3 tests/evaluator.py --suite fixtures --depths 3,4 --ab-depths 3,4 --ab-me
 python3 tests/evaluator.py --suite fixtures --depths 3,4 --json-out /tmp/eval_summary.json --jsonl-out /tmp/eval_runs.jsonl
 python3 tests/evaluator.py --suite fixtures --depths 3,4 --jsonl-out /tmp/eval_runs.jsonl --resume
 python3 tests/evaluator.py --suite fixtures --depths 3,4 --checkpoint-out /tmp/eval_ckpt.json --checkpoint-every 50
+python3 tests/evaluator.py --suite fixtures --depths 3,4 --module strategy --jobs 4
+python3 tests/evaluator.py --suite fixtures --depths 3 --module strategy --candidate-module strategy_alt --ab-metric score
 
 # Lint (mirrors CI)
 ruff check .
@@ -175,9 +177,12 @@ Use these definitions consistently when comparing strategy changes:
 - CI bands: summary includes bootstrap 95% CIs for `avg_score`, `avg_max`, `avg_eval` (configured by `--bootstraps`).
 - Paired A/B mode: `--ab-depths baseline,candidate --ab-metric score|max_tile|final_eval` compares identical fixture+seed samples.
 - A/B significance: permutation test p-value is reported (`--ab-permutations` controls sample count).
+- Module A/B mode: `--module`, `--baseline-module`, `--candidate-module` compares two strategy implementations with paired seeds.
 - Long-run visibility: status logs print depth/fixture/seed progress (`--progress-every`).
 - ETA is printed during seed progress logs (`overall=X/Y eta=...`).
 - Resume support: `--resume` reuses completed `(depth, fixture, seed)` rows from `--jsonl-out`.
+- Resume safety: `--resume` requires a manifest alongside JSONL; evaluator validates config/fixture fingerprint/module name before resuming.
+- Parallelism: `--jobs N` uses multiprocessing when available and auto-falls back to single-process if the environment blocks process pools.
 - Checkpoint snapshots: `--checkpoint-out` writes periodic and final progress snapshots (`--checkpoint-every` controls cadence).
 - Structured output:
   - `--json-out`: aggregate summary/per-fixture payload (includes git SHA and timestamp).
