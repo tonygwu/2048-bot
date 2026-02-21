@@ -277,10 +277,12 @@ def get_recompute_states(
     if not os.path.exists(DB_PATH):
         return []
 
+    init_db()
     lim = None if limit is None else max(0, int(limit))
     off = max(0, int(offset))
-    conn = _connect()
+    conn = _connect_ro()
     try:
+        _set_common_pragmas(conn)
         if only_missing_current:
             sql = """
                 SELECT e.board_bb, e.swap_uses, e.delete_uses
