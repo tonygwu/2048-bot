@@ -18,7 +18,15 @@ from game import (
     execute_move, execute_undo, execute_undo_on_gameover, execute_swap, execute_delete,
     dismiss_win_overlay, new_game, print_board,
 )
-from strategy import best_action
+from strategy import (
+    best_action,
+    SCORE_BOARD_VERSION,
+    load_trans_table,
+    drain_new_entries,
+    get_trans_stats,
+    reset_trans_stats,
+)
+import cache as db
 
 TARGET_TILE = 16384   # stop once this tile is reached
 
@@ -225,12 +233,43 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
 async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
     label = "auto" if depth_arg is None else str(depth_arg)
     print(f"Launching 2048 bot  (depth={label}, games={num_games}, headless={headless})")
+
+    # ── Load transposition table from DB ──────────────────────────────────────
+    t_load = time.time()
+    cached = db.load_version(SCORE_BOARD_VERSION)
+    if cached:
+        load_trans_table(cached)
+        print(f"Loaded {len(cached):,} cached score_board entries  "
+              f"(version={SCORE_BOARD_VERSION!r}, {(time.time()-t_load)*1000:.0f}ms)")
+    else:
+        print(f"No cached entries found for version={SCORE_BOARD_VERSION!r}  "
+              f"(run populate_cache.py --generate N to seed)")
+
     pw, browser, page = await launch_browser(headless=headless)
 
     all_stats = []
     try:
         for game_num in range(1, num_games + 1):
+            reset_trans_stats()
             stats = await play_one_game(page, depth_arg, game_num)
+
+            # ── Print cache stats for this game ───────────────────────────────
+            ts = get_trans_stats()
+            total_lookups = ts["hits"] + ts["misses"]
+            hit_rate = ts["hits"] / total_lookups * 100 if total_lookups else 0.0
+            print(f"\nCache stats (game {game_num}): "
+                  f"hits={ts['hits']:,}  misses={ts['misses']:,}  "
+                  f"hit_rate={hit_rate:.1f}%  table_size={len(cached) + ts['misses']:,}")
+
+            # ── Flush new entries to DB ────────────────────────────────────────
+            new_entries = drain_new_entries()
+            if new_entries:
+                written = db.save_entries(new_entries, SCORE_BOARD_VERSION)
+                print(f"  Flushed {written:,} new entries to DB.")
+                cached.update(new_entries)   # keep local count accurate
+
+            stats["cache_hits"]   = ts["hits"]
+            stats["cache_misses"] = ts["misses"]
             all_stats.append(stats)
 
             if game_num < num_games:
@@ -240,17 +279,21 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
                 # Wait for fresh board
                 await asyncio.sleep(0.8)
 
-        # Summary
-        print(f"\n{'='*50}")
+        # ── Summary ───────────────────────────────────────────────────────────
+        print(f"\n{'='*60}")
         print(f"  Summary — {num_games} game(s)")
-        print(f"{'='*50}")
-        print(f"{'Game':>5}  {'Score':>7}  {'Best':>7}  {'MaxTile':>8}  {'Moves':>6}  Powers(S/D)")
-        print("-" * 58)
+        print(f"{'='*60}")
+        print(f"{'Game':>5}  {'Score':>7}  {'Best':>7}  {'MaxTile':>8}  "
+              f"{'Moves':>6}  {'CacheHit%':>9}  Powers(S/D)")
+        print("-" * 68)
         for s in all_stats:
             pu = s.get("powers_used", {})
+            total = s["cache_hits"] + s["cache_misses"]
+            hr = s["cache_hits"] / total * 100 if total else 0.0
             print(
                 f"{s['game']:>5}  {s['score']:>7}  {s['best']:>7}  "
                 f"{s['max_tile']:>8}  {s['moves']:>6}  "
+                f"{hr:>8.1f}%  "
                 f"S={pu.get('swap',0)} D={pu.get('delete',0)}"
             )
 

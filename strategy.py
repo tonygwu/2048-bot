@@ -12,6 +12,50 @@ import math
 
 DIRECTIONS = ["up", "down", "left", "right"]
 
+# ── Transposition table ────────────────────────────────────────────────────────
+# Bump this string whenever heuristic weights or eval logic changes.
+# The SQLite cache stores scores per-version; stale entries are ignored.
+SCORE_BOARD_VERSION = "1.0"
+
+_TRANS_TABLE: dict = {}      # (board_bb, swap_uses, delete_uses) → score
+_NEW_ENTRIES: dict = {}      # same keys — entries added this run (for DB flush)
+_TRANS_STATS = {"hits": 0, "misses": 0}
+_TRANS_CAP   = 500_000       # evict (clear all) when table grows beyond this
+
+
+def board_to_bb(board: list[list[int]]) -> int:
+    """Encode a 4x4 board as a 64-bit int: 4 bits per cell = log2(tile), row-major."""
+    bb = 0
+    for r in range(4):
+        for c in range(4):
+            v = board[r][c]
+            if v > 0:
+                bb |= (v.bit_length() - 1) << (4 * (r * 4 + c))
+    return bb
+
+
+def load_trans_table(entries: dict) -> None:
+    """Bulk-load pre-computed entries into _TRANS_TABLE (called at bot startup)."""
+    _TRANS_TABLE.update(entries)
+
+
+def drain_new_entries() -> dict:
+    """Return and clear the set of entries added since the last drain (for DB flush)."""
+    out = dict(_NEW_ENTRIES)
+    _NEW_ENTRIES.clear()
+    return out
+
+
+def get_trans_stats() -> dict:
+    """Return a copy of the current hit/miss counters."""
+    return dict(_TRANS_STATS)
+
+
+def reset_trans_stats() -> None:
+    """Zero the hit/miss counters (call between games)."""
+    _TRANS_STATS["hits"] = 0
+    _TRANS_STATS["misses"] = 0
+
 # ── Game simulation ────────────────────────────────────────────────────────────
 
 def _slide_row(row: list[int]) -> tuple[list[int], int]:
@@ -299,9 +343,23 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     powers (optional) is the current {"swap": N, "delete": N} inventory.
     When supplied, the power-up value is folded into the score so the search
     tree naturally prices spending a use.
+
+    Results are cached in _TRANS_TABLE keyed by (board_bb, swap_uses, delete_uses).
     """
     if powers is None:
         powers = {}
+    swap_uses   = powers.get("swap",   0)
+    delete_uses = powers.get("delete", 0)
+    bb  = board_to_bb(board)
+    key = (bb, swap_uses, delete_uses)
+
+    cached = _TRANS_TABLE.get(key)
+    if cached is not None:
+        _TRANS_STATS["hits"] += 1
+        return cached
+
+    _TRANS_STATS["misses"] += 1
+
     empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
     max_val = max(board[r][c] for r in range(4) for c in range(4))
     tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
@@ -309,7 +367,7 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     corner_bonus = (_W_CORNER * math.log2(max_val)
                     if max_val > 0 and board[0][0] == max_val else 0.0)
 
-    return (
+    result = (
           _W_EMPTY *  empties
         + _W_GRAD  * _gradient(board)
         + _W_MONO  * _monotonicity(board)
@@ -320,6 +378,12 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
         + corner_bonus
         + _powerup_value(max_val, powers)
     )
+
+    if len(_TRANS_TABLE) >= _TRANS_CAP:
+        _TRANS_TABLE.clear()
+    _TRANS_TABLE[key] = result
+    _NEW_ENTRIES[key] = result
+    return result
 
 
 # ── Expectimax ────────────────────────────────────────────────────────────────

@@ -98,6 +98,39 @@ Three files, no external game logic libraries:
 - `play_one_game()` handles the full lifecycle: win overlay dismissal (guard flag so DOM element persisting hidden doesn't re-trigger), stuck-board detection (5 unchanged consecutive moves), and power-up tracking.
 - Prints board and status every 25 moves; announces depth bumps in auto mode.
 
+## Transposition Table System
+
+`score_board` results are cached to avoid recomputing the same board position multiple times within and across game runs.
+
+**In-memory cache** (`strategy.py`):
+- `_TRANS_TABLE`: `{(board_bb, swap_uses, delete_uses) → score}`. Cleared (LRU-free eviction) when it reaches `_TRANS_CAP` (500 000 entries).
+- `_NEW_ENTRIES`: same keys, only entries added in the current run — drained after each game and flushed to SQLite.
+- `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
+
+**SQLite persistence** (`cache.py`, `cache/transposition.db`):
+- Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.
+- `board_bb` is stored as signed int64 (`_to_signed`/`_from_signed` helpers handle values > 2^63).
+- `load_version(version)` → dict loaded into `_TRANS_TABLE` at bot startup.
+- `save_entries(entries, version)` writes new rows after each game.
+
+**Versioning** — **CRITICAL**:
+- `SCORE_BOARD_VERSION` in `strategy.py` must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
+- Old version rows remain in the DB but are ignored; `populate_cache.py --recompute` re-scores them under the new version.
+
+**`populate_cache.py`** — Cache seeding/maintenance:
+```bash
+# Re-score all known board states under the current version (after a heuristic bump):
+.venv/bin/python populate_cache.py --recompute
+
+# Generate N self-play positions at depth D and cache them:
+.venv/bin/python populate_cache.py --generate 500 --depth 3
+
+# Inspect DB contents:
+.venv/bin/python populate_cache.py --list
+```
+
+**Bot output** — cache stats are printed after each game and included in the summary table (`CacheHit%` column).
+
 ## Key Implementation Notes
 
 - The site uses Svelte + Tailwind CSS with an OffscreenCanvas in a Web Worker. DOM inspection does not reveal tile values directly.
