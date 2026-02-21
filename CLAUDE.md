@@ -72,6 +72,9 @@ python3 tests/evaluator.py --suite fixtures --depths 3,4 --jsonl-out /tmp/eval_r
 python3 tests/evaluator.py --suite fixtures --depths 3,4 --checkpoint-out /tmp/eval_ckpt.json --checkpoint-every 50
 python3 tests/evaluator.py --suite fixtures --depths 3,4 --module strategy --jobs 4
 python3 tests/evaluator.py --suite fixtures --depths 3 --module strategy --candidate-module strategy_alt --ab-metric score
+python3 tests/evaluator.py --suite fixtures --depths 3,4 --cache-mode warm --per-group
+python3 tests/evaluator.py --suite fixtures --depths 3,4 --ab-depths 3,4 --fail-if-score-drop 15 --fail-if-think-increase 0.5
+python3 tests/evaluator.py --suite fixtures --depths 3 --module strategy --candidate-module strategy_alt --fail-if-score-drop 10
 
 # Lint (mirrors CI)
 ruff check .
@@ -178,15 +181,19 @@ Use these definitions consistently when comparing strategy changes:
 - Paired A/B mode: `--ab-depths baseline,candidate --ab-metric score|max_tile|final_eval` compares identical fixture+seed samples.
 - A/B significance: permutation test p-value is reported (`--ab-permutations` controls sample count).
 - Module A/B mode: `--module`, `--baseline-module`, `--candidate-module` compares two strategy implementations with paired seeds.
+- Cache controls: `--cache-mode warm|cold|reset-per-run` for cache-warm realism vs isolation.
+- Fixture subgroup rollups: `--per-group` prints aggregate metrics by fixture tags (`open`, `jammed`, `late`, `powerup`, `mid`).
 - Long-run visibility: status logs print depth/fixture/seed progress (`--progress-every`).
 - ETA is printed during seed progress logs (`overall=X/Y eta=...`).
 - Resume support: `--resume` reuses completed `(depth, fixture, seed)` rows from `--jsonl-out`.
 - Resume safety: `--resume` requires a manifest alongside JSONL; evaluator validates config/fixture fingerprint/module name before resuming.
 - Parallelism: `--jobs N` uses multiprocessing when available and auto-falls back to single-process if the environment blocks process pools.
 - Checkpoint snapshots: `--checkpoint-out` writes periodic and final progress snapshots (`--checkpoint-every` controls cadence).
+- Guardrails: `--fail-if-score-drop X` and `--fail-if-think-increase Y` enforce CI thresholds in A/B and module-compare modes (non-zero exit on failure).
 - Structured output:
   - `--json-out`: aggregate summary/per-fixture payload (includes git SHA and timestamp).
   - `--jsonl-out`: one row per run (depth + fixture + seed + run metrics).
+  - JSON includes `per_group` and guardrail pass/fail context.
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
 - Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.

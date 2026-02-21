@@ -115,6 +115,7 @@ class StrategyFns:
     best_action: object
     get_trans_stats: object
     is_game_over: object
+    reset_trans_cache: object | None
     reset_trans_stats: object
     score_board: object
 
@@ -219,8 +220,8 @@ def _load_strategy_fns(module_name: str) -> StrategyFns:
         "best_action",
         "get_trans_stats",
         "is_game_over",
-        "reset_trans_stats",
         "score_board",
+        "reset_trans_stats",
     ]
     missing = [name for name in required if not hasattr(module, name)]
     if missing:
@@ -232,6 +233,7 @@ def _load_strategy_fns(module_name: str) -> StrategyFns:
         best_action=getattr(module, "best_action"),
         get_trans_stats=getattr(module, "get_trans_stats"),
         is_game_over=getattr(module, "is_game_over"),
+        reset_trans_cache=getattr(module, "reset_trans_cache", None),
         reset_trans_stats=getattr(module, "reset_trans_stats"),
         score_board=getattr(module, "score_board"),
     )
@@ -254,6 +256,23 @@ def _fixtures_fingerprint(fixtures: list[Fixture]) -> str:
     return hashlib.sha256(blob).hexdigest()
 
 
+def _fixture_tags(fx: Fixture) -> list[str]:
+    tags: list[str] = []
+    empties = sum(1 for r in range(4) for c in range(4) if fx.board[r][c] == 0)
+    max_tile = max(v for row in fx.board for v in row)
+    if empties >= 8:
+        tags.append("open")
+    if empties <= 3:
+        tags.append("jammed")
+    if max_tile >= 2048:
+        tags.append("late")
+    if any(fx.powers.get(k, 0) > 0 for k in ("swap", "delete", "undo")):
+        tags.append("powerup")
+    if not tags:
+        tags.append("mid")
+    return tags
+
+
 def _manifest_path(jsonl_out: str) -> Path:
     p = Path(jsonl_out)
     return p.with_suffix(p.suffix + ".manifest.json")
@@ -268,6 +287,7 @@ def _build_manifest(
     seeds: int,
     seed_start: int,
     no_random: bool,
+    cache_mode: str,
     fixtures: list[Fixture],
     module_name: str,
 ) -> dict:
@@ -279,6 +299,7 @@ def _build_manifest(
         "seeds": seeds,
         "seed_start": seed_start,
         "no_random": no_random,
+        "cache_mode": cache_mode,
         "module_name": module_name,
         "fixtures_fingerprint": _fixtures_fingerprint(fixtures),
     }
@@ -374,6 +395,7 @@ def _simulate_one(
     n_moves: int,
     seed: int,
     no_random: bool,
+    cache_mode: str,
 ) -> dict:
     fns = _load_strategy_fns(module_name)
     rng = random.Random(seed)
@@ -385,6 +407,8 @@ def _simulate_one(
     think_ms_total = 0.0
     action_counts = {"move": 0, "swap": 0, "delete": 0}
     think_samples: list[float] = []
+    if cache_mode == "reset-per-run" and fns.reset_trans_cache is not None:
+        fns.reset_trans_cache()
     fns.reset_trans_stats()
 
     for _ in range(n_moves):
@@ -512,6 +536,7 @@ def _simulate_task(task: dict) -> tuple[int, str, int, dict]:
         n_moves=task["n_moves"],
         seed=task["seed"],
         no_random=task["no_random"],
+        cache_mode=task["cache_mode"],
     )
     return task["depth"], fx.name, task["seed"], run
 
@@ -524,6 +549,7 @@ def evaluate_suite(
     seed_start: int,
     no_random: bool,
     module_name: str = DEFAULT_MODULE,
+    cache_mode: str = "warm",
     jobs: int = 1,
     progress_every: int = 5,
     bootstrap_count: int = DEFAULT_BOOTSTRAPS,
@@ -531,10 +557,11 @@ def evaluate_suite(
     resume: bool = False,
     checkpoint_out: str | None = None,
     checkpoint_every: int = 25,
-) -> tuple[list[dict], dict[int, dict[str, dict]], dict[int, dict[str, list[dict]]]]:
+) -> tuple[list[dict], dict[int, dict[str, dict]], dict[int, dict[str, list[dict]]], dict[int, dict[str, dict]]]:
     summary_rows: list[dict] = []
     per_fixture_depth: dict[int, dict[str, dict]] = {}
     per_fixture_runs: dict[int, dict[str, list[dict]]] = {}
+    per_group_depth: dict[int, dict[str, dict]] = {}
 
     existing_completed: set[tuple[str, int, str, int]] = set()
     existing_rows: list[dict] = []
@@ -563,6 +590,12 @@ def evaluate_suite(
     checkpoint_path = Path(checkpoint_out) if checkpoint_out else None
     if checkpoint_path:
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Cache mode hooks are only meaningful within a single process.
+    if cache_mode == "cold":
+        fns = _load_strategy_fns(module_name)
+        if fns.reset_trans_cache is not None:
+            fns.reset_trans_cache()
 
     total_units = len(depths) * len(fixtures) * n_seeds
     completed_units = 0
@@ -617,6 +650,7 @@ def evaluate_suite(
                             "n_moves": n_moves,
                             "seed": seed,
                             "no_random": no_random,
+                            "cache_mode": cache_mode,
                         }
                     )
 
@@ -695,6 +729,7 @@ def evaluate_suite(
     for depth in depths:
         per_fixture_depth[depth] = {}
         per_fixture_runs[depth] = {}
+        per_group_depth[depth] = {}
         all_runs: list[dict] = []
         for fx in fixtures:
             runs: list[dict] = []
@@ -709,6 +744,15 @@ def evaluate_suite(
             all_runs.extend(runs)
         row = {"depth": depth, **_aggregate(all_runs, bootstrap_count=bootstrap_count)}
         summary_rows.append(row)
+        group_runs: dict[str, list[dict]] = {}
+        for fx in fixtures:
+            runs = per_fixture_runs[depth][fx.name]
+            for tag in _fixture_tags(fx):
+                group_runs.setdefault(tag, []).extend(runs)
+        per_group_depth[depth] = {
+            tag: _aggregate(runs, bootstrap_count=bootstrap_count)
+            for tag, runs in group_runs.items()
+        }
         print(
             f"[status] depth {depth} summary "
             f"(avg_score={row['avg_score']:.1f}, avg_think_ms={row['avg_think_ms']:.2f})"
@@ -731,9 +775,10 @@ def evaluate_suite(
             },
             "summary": summary_rows,
             "per_fixture": per_fixture_depth,
+            "per_group": per_group_depth,
         }
         checkpoint_path.write_text(json.dumps(final_checkpoint, indent=2))
-    return summary_rows, per_fixture_depth, per_fixture_runs
+    return summary_rows, per_fixture_depth, per_fixture_runs, per_group_depth
 
 
 def _print_metric_glossary() -> None:
@@ -791,10 +836,47 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
         )
 
 
+def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
+    print(f"\nPer-group metrics (depth={depth}):")
+    print(
+        "| group | avg_score | avg_max | survive% | reach2048% | "
+        "reach4096% | reach8192% | avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
+        "action_mix(move/swap/delete) |"
+    )
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for name in sorted(stats.keys()):
+        s = stats[name]
+        mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}"
+        print(
+            f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
+            f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
+            f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
+            f"{s['cache_hit_rate_pct']:.1f} | {mix} |"
+        )
+
+
+def _collect_paired_deltas(
+    *,
+    baseline_runs: dict[int, dict[str, list[dict]]],
+    candidate_runs: dict[int, dict[str, list[dict]]],
+    fixtures: list[Fixture],
+    depths: list[int],
+    metric_key: str,
+) -> list[float]:
+    deltas: list[float] = []
+    for d in depths:
+        for fx in fixtures:
+            b_runs = baseline_runs[d][fx.name]
+            c_runs = candidate_runs[d][fx.name]
+            for i in range(min(len(b_runs), len(c_runs))):
+                deltas.append(c_runs[i][metric_key] - b_runs[i][metric_key])
+    return deltas
+
+
 def run_depth_calibration_legacy(n_moves: int, n_seeds: int, depths: list[int]) -> None:
     """Compatibility entrypoint used by benchmark_depth.py."""
     fixtures = _load_fixture_suite("depth_calibration")
-    rows, per_fx, _ = evaluate_suite(
+    rows, per_fx, _, _ = evaluate_suite(
         fixtures=fixtures,
         depths=depths,
         n_moves=n_moves,
@@ -842,11 +924,18 @@ def main() -> None:
     parser.add_argument("--baseline-module", default=None, help="Baseline strategy module for module-vs-module comparison")
     parser.add_argument("--candidate-module", default=None, help="Candidate strategy module for module-vs-module comparison")
     parser.add_argument("--jobs", type=int, default=1, help="Parallel worker processes for simulation runs (default: 1)")
+    parser.add_argument(
+        "--cache-mode",
+        choices=["warm", "cold", "reset-per-run"],
+        default="warm",
+        help="Transposition cache mode: warm(default), cold(per-suite reset), reset-per-run",
+    )
     parser.add_argument("--moves", type=int, default=DEFAULT_MOVES)
     parser.add_argument("--seeds", type=int, default=DEFAULT_SEEDS)
     parser.add_argument("--seed-start", type=int, default=0)
     parser.add_argument("--no-random", action="store_true")
     parser.add_argument("--per-fixture", action="store_true", help="Print per-fixture metrics for each depth")
+    parser.add_argument("--per-group", action="store_true", help="Print per-group (fixture tag) metrics for each depth")
     parser.add_argument("--json-out", default=None, help="Optional path to write machine-readable JSON results")
     parser.add_argument(
         "--jsonl-out",
@@ -888,6 +977,18 @@ def main() -> None:
         default=DEFAULT_AB_PERMUTATIONS,
         help=f"Permutation count for A/B significance test (default: {DEFAULT_AB_PERMUTATIONS})",
     )
+    parser.add_argument(
+        "--fail-if-score-drop",
+        type=float,
+        default=None,
+        help="Fail run if candidate mean paired score delta is below negative threshold (e.g. 10 => fail if delta < -10)",
+    )
+    parser.add_argument(
+        "--fail-if-think-increase",
+        type=float,
+        default=None,
+        help="Fail run if candidate mean paired think-ms delta exceeds threshold",
+    )
     args = parser.parse_args()
 
     if args.moves <= 0:
@@ -904,10 +1005,18 @@ def main() -> None:
         parser.error("--checkpoint-every must be > 0")
     if args.ab_permutations <= 0:
         parser.error("--ab-permutations must be > 0")
+    if args.fail_if_score_drop is not None and args.fail_if_score_drop < 0:
+        parser.error("--fail-if-score-drop must be >= 0")
+    if args.fail_if_think_increase is not None and args.fail_if_think_increase < 0:
+        parser.error("--fail-if-think-increase must be >= 0")
     if args.resume and not args.jsonl_out:
         parser.error("--resume requires --jsonl-out")
     if args.candidate_module and args.resume:
         parser.error("--resume is not supported with --candidate-module compare mode")
+    if (
+        args.fail_if_score_drop is not None or args.fail_if_think_increase is not None
+    ) and not (args.ab_depths or args.candidate_module):
+        parser.error("guardrail flags require --ab-depths or --candidate-module compare mode")
 
     try:
         depths = _parse_depths(args.depths)
@@ -937,7 +1046,7 @@ def main() -> None:
     print(
         f"[status] starting evaluator: suite={args.suite} fixtures={len(fixtures)} "
         f"depths={depths} moves={args.moves} seeds={args.seeds} seed_start={args.seed_start} "
-        f"module={args.module} jobs={args.jobs}"
+        f"module={args.module} jobs={args.jobs} cache_mode={args.cache_mode}"
     )
 
     # Manifest validation / setup for resume-safe runs.
@@ -950,6 +1059,7 @@ def main() -> None:
             seeds=args.seeds,
             seed_start=args.seed_start,
             no_random=args.no_random,
+            cache_mode=args.cache_mode,
             fixtures=fixtures,
             module_name=args.module,
         )
@@ -967,7 +1077,7 @@ def main() -> None:
             mpath.parent.mkdir(parents=True, exist_ok=True)
             mpath.write_text(json.dumps(manifest, indent=2))
 
-    rows, per_fx, per_runs = evaluate_suite(
+    rows, per_fx, per_runs, per_group = evaluate_suite(
         fixtures=fixtures,
         depths=depths,
         n_moves=args.moves,
@@ -975,6 +1085,7 @@ def main() -> None:
         seed_start=args.seed_start,
         no_random=args.no_random,
         module_name=args.module,
+        cache_mode=args.cache_mode,
         jobs=args.jobs,
         progress_every=args.progress_every,
         bootstrap_count=args.bootstraps,
@@ -989,8 +1100,12 @@ def main() -> None:
     if args.per_fixture:
         for d in depths:
             _print_per_fixture(depth=d, stats=per_fx[d])
+    if args.per_group:
+        for d in depths:
+            _print_per_group(depth=d, stats=per_group[d])
 
     ab_result = None
+    guardrail_context = None
     if args.ab_depths:
         try:
             ab_depths = _parse_depths(args.ab_depths)
@@ -1002,13 +1117,17 @@ def main() -> None:
         if d_base not in per_runs or d_cand not in per_runs:
             parser.error("--ab-depths must be included in --depths")
 
-        paired_deltas: list[float] = []
         metric_key = args.ab_metric
+        paired_deltas: list[float] = []
+        score_deltas: list[float] = []
+        think_deltas: list[float] = []
         for fx in fixtures:
             base_runs = per_runs[d_base][fx.name]
             cand_runs = per_runs[d_cand][fx.name]
             for i in range(min(len(base_runs), len(cand_runs))):
                 paired_deltas.append(cand_runs[i][metric_key] - base_runs[i][metric_key])
+                score_deltas.append(cand_runs[i]["score"] - base_runs[i]["score"])
+                think_deltas.append(cand_runs[i]["think_ms_mean"] - base_runs[i]["think_ms_mean"])
 
         mean_delta = sum(paired_deltas) / len(paired_deltas) if paired_deltas else 0.0
         ci_lo, ci_hi = _bootstrap_mean_ci(
@@ -1035,6 +1154,13 @@ def main() -> None:
             "loss_rate_pct": loss_rate,
             "p_value": p_value,
             "permutations": args.ab_permutations,
+            "mean_score_delta": sum(score_deltas) / len(score_deltas) if score_deltas else 0.0,
+            "mean_think_ms_delta": sum(think_deltas) / len(think_deltas) if think_deltas else 0.0,
+        }
+        guardrail_context = {
+            "label": f"depth {d_base} -> {d_cand}",
+            "mean_score_delta": ab_result["mean_score_delta"],
+            "mean_think_ms_delta": ab_result["mean_think_ms_delta"],
         }
         print("\nA/B Paired Comparison")
         print(
@@ -1045,6 +1171,10 @@ def main() -> None:
             f"  mean_delta={mean_delta:+.2f} "
             f"ci95=[{ci_lo:+.2f}, {ci_hi:+.2f}] "
             f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={p_value:.4f}"
+        )
+        print(
+            f"  guardrail_deltas: score={ab_result['mean_score_delta']:+.2f} "
+            f"think_ms={ab_result['mean_think_ms_delta']:+.3f}"
         )
 
     module_compare_result = None
@@ -1058,7 +1188,7 @@ def main() -> None:
             base_rows = rows
             base_runs = per_runs
         else:
-            base_rows, _, base_runs = evaluate_suite(
+            base_rows, _, base_runs, _ = evaluate_suite(
                 fixtures=fixtures,
                 depths=depths,
                 n_moves=args.moves,
@@ -1066,6 +1196,7 @@ def main() -> None:
                 seed_start=args.seed_start,
                 no_random=args.no_random,
                 module_name=baseline_module,
+                cache_mode=args.cache_mode,
                 jobs=args.jobs,
                 progress_every=args.progress_every,
                 bootstrap_count=args.bootstraps,
@@ -1074,7 +1205,7 @@ def main() -> None:
                 checkpoint_out=None,
                 checkpoint_every=args.checkpoint_every,
             )
-        cand_rows, _, cand_runs = evaluate_suite(
+        cand_rows, _, cand_runs, _ = evaluate_suite(
             fixtures=fixtures,
             depths=depths,
             n_moves=args.moves,
@@ -1082,6 +1213,7 @@ def main() -> None:
             seed_start=args.seed_start,
             no_random=args.no_random,
             module_name=args.candidate_module,
+            cache_mode=args.cache_mode,
             jobs=args.jobs,
             progress_every=args.progress_every,
             bootstrap_count=args.bootstraps,
@@ -1095,14 +1227,28 @@ def main() -> None:
         print()
         _print_summary_table(cand_rows, title=f"Candidate Module Summary ({args.candidate_module})")
 
-        deltas: list[float] = []
         metric_key = args.ab_metric
-        for d in depths:
-            for fx in fixtures:
-                b_runs = base_runs[d][fx.name]
-                c_runs = cand_runs[d][fx.name]
-                for i in range(min(len(b_runs), len(c_runs))):
-                    deltas.append(c_runs[i][metric_key] - b_runs[i][metric_key])
+        deltas = _collect_paired_deltas(
+            baseline_runs=base_runs,
+            candidate_runs=cand_runs,
+            fixtures=fixtures,
+            depths=depths,
+            metric_key=metric_key,
+        )
+        score_deltas = _collect_paired_deltas(
+            baseline_runs=base_runs,
+            candidate_runs=cand_runs,
+            fixtures=fixtures,
+            depths=depths,
+            metric_key="score",
+        )
+        think_deltas = _collect_paired_deltas(
+            baseline_runs=base_runs,
+            candidate_runs=cand_runs,
+            fixtures=fixtures,
+            depths=depths,
+            metric_key="think_ms_mean",
+        )
         mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
         ci_lo, ci_hi = _bootstrap_mean_ci(deltas, n_bootstrap=args.bootstraps, seed=args.seed_start + 41)
         p_value = _paired_permutation_test(
@@ -1123,6 +1269,13 @@ def main() -> None:
             "loss_rate_pct": loss_rate,
             "p_value": p_value,
             "permutations": args.ab_permutations,
+            "mean_score_delta": sum(score_deltas) / len(score_deltas) if score_deltas else 0.0,
+            "mean_think_ms_delta": sum(think_deltas) / len(think_deltas) if think_deltas else 0.0,
+        }
+        guardrail_context = {
+            "label": f"module {baseline_module} -> {args.candidate_module}",
+            "mean_score_delta": module_compare_result["mean_score_delta"],
+            "mean_think_ms_delta": module_compare_result["mean_think_ms_delta"],
         }
         print("\nModule A/B Comparison")
         print(
@@ -1134,6 +1287,29 @@ def main() -> None:
             f"ci95=[{ci_lo:+.2f}, {ci_hi:+.2f}] "
             f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={p_value:.4f}"
         )
+        print(
+            f"  guardrail_deltas: score={module_compare_result['mean_score_delta']:+.2f} "
+            f"think_ms={module_compare_result['mean_think_ms_delta']:+.3f}"
+        )
+
+    guardrail_failures: list[str] = []
+    if guardrail_context is not None:
+        if args.fail_if_score_drop is not None:
+            if guardrail_context["mean_score_delta"] < -args.fail_if_score_drop:
+                guardrail_failures.append(
+                    f"score delta {guardrail_context['mean_score_delta']:+.2f} < -{args.fail_if_score_drop:.2f}"
+                )
+        if args.fail_if_think_increase is not None:
+            if guardrail_context["mean_think_ms_delta"] > args.fail_if_think_increase:
+                guardrail_failures.append(
+                    f"think_ms delta {guardrail_context['mean_think_ms_delta']:+.3f} > {args.fail_if_think_increase:.3f}"
+                )
+        if guardrail_failures:
+            print(f"\n[guardrail] FAILED ({guardrail_context['label']})")
+            for msg in guardrail_failures:
+                print(f"[guardrail] {msg}")
+        elif args.fail_if_score_drop is not None or args.fail_if_think_increase is not None:
+            print(f"\n[guardrail] PASSED ({guardrail_context['label']})")
 
     if args.json_out:
         payload = {
@@ -1151,6 +1327,7 @@ def main() -> None:
                 "no_random": args.no_random,
                 "module": args.module,
                 "jobs": args.jobs,
+                "cache_mode": args.cache_mode,
                 "baseline_module": args.baseline_module,
                 "candidate_module": args.candidate_module,
                 "bootstraps": args.bootstraps,
@@ -1158,18 +1335,29 @@ def main() -> None:
                 "ab_depths": args.ab_depths,
                 "ab_metric": args.ab_metric,
                 "ab_permutations": args.ab_permutations,
+                "fail_if_score_drop": args.fail_if_score_drop,
+                "fail_if_think_increase": args.fail_if_think_increase,
                 "resume": args.resume,
                 "checkpoint_out": args.checkpoint_out,
                 "checkpoint_every": args.checkpoint_every,
             },
             "summary": rows,
             "per_fixture": per_fx,
+            "per_group": per_group,
             "ab_result": ab_result,
             "module_compare_result": module_compare_result,
+            "guardrail": {
+                "context": guardrail_context,
+                "failures": guardrail_failures,
+                "passed": len(guardrail_failures) == 0 if guardrail_context is not None else None,
+            },
             "jsonl_out": args.jsonl_out,
         }
         Path(args.json_out).write_text(json.dumps(payload, indent=2))
         print(f"\nWrote JSON results: {args.json_out}")
+
+    if guardrail_failures:
+        sys.exit(2)
 
 
 if __name__ == "__main__":

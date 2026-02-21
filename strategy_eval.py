@@ -39,6 +39,14 @@ def reset_trans_stats() -> None:
     _TRANS_CACHE.reset_stats()
 
 
+def reset_trans_cache() -> None:
+    """Clear in-memory transposition cache and pending new entries."""
+    _TRANS_CACHE.table.clear()
+    _TRANS_CACHE.new_entries.clear()
+    _TRANS_CACHE.keep_oversized_preload = False
+    _TRANS_CACHE.reset_stats()
+
+
 _SNAKE = [
     [16, 15, 14, 13],
     [9, 10, 11, 12],
