@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 URL = "https://play2048.co/"
-MOVE_DELAY = 0.15   # fallback delay if worker-update wait times out
+MOVE_DELAY = 0.05   # fallback delay only if worker-update wait times out
 UPDATE_WAIT_TIMEOUT_MS = 220
 
 
