@@ -32,6 +32,35 @@ import cache as db
 TARGET_TILE = 16384   # stop once this tile is reached
 
 
+def _percentile(values: list[int], p: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    s = sorted(values)
+    pos = (len(s) - 1) * p
+    lo = int(pos)
+    hi = min(lo + 1, len(s) - 1)
+    frac = pos - lo
+    return s[lo] + (s[hi] - s[lo]) * frac
+
+
+def _depth_stats(depths: list[int]) -> dict:
+    if not depths:
+        return {
+            "depth_mean": 0.0,
+            "depth_p25": 0.0,
+            "depth_p50": 0.0,
+            "depth_p75": 0.0,
+        }
+    return {
+        "depth_mean": sum(depths) / len(depths),
+        "depth_p25": _percentile(depths, 0.25),
+        "depth_p50": _percentile(depths, 0.50),
+        "depth_p75": _percentile(depths, 0.75),
+    }
+
+
 async def play_one_game(page, depth_arg, game_num: int) -> dict:
     """Play a single game to completion. Returns stats dict.
 
@@ -53,6 +82,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
     stuck_recoveries = 0
     best_score_seen = 0
     powers_used = {"undo": 0, "swap": 0, "delete": 0}
+    depth_samples: list[int] = []
     win_overlay_dismissed = False  # only dismiss once; DOM element persists hidden after dismissal
     win_overlay_retry_count = 0
 
@@ -107,6 +137,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                 "max_tile": max_tile,
                 "elapsed": elapsed,
                 "powers_used": dict(powers_used),
+                **_depth_stats(depth_samples),
             }
 
         # ── True game over ────────────────────────────────────────────────────
@@ -128,6 +159,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                 "max_tile": max_tile,
                 "elapsed": elapsed,
                 "powers_used": dict(powers_used),
+                **_depth_stats(depth_samples),
             }
 
         # ── Win overlay (2048+) — dismiss and keep playing ────────────────────
@@ -151,6 +183,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
 
         # ── Compute depth for this move ───────────────────────────────────────
         depth = auto_depth(state.board) if auto else depth_arg
+        depth_samples.append(depth)
 
         # Announce depth changes (auto mode)
         if auto and depth != last_depth:
@@ -248,6 +281,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
         "max_tile": max(v for row in state.board for v in row),
         "elapsed": time.time() - t_start,
         "powers_used": dict(powers_used),
+        **_depth_stats(depth_samples),
     }
 
 
@@ -257,15 +291,35 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
 
     # ── Load transposition table from DB ──────────────────────────────────────
     print(f"Cache DB path: {db.DB_PATH}")
+    version_rows = None
     try:
         versions = db.list_versions()
-        print(f"Cache rows for current version {SCORE_BOARD_VERSION!r}: "
-              f"{versions.get(SCORE_BOARD_VERSION, 0):,}")
+        version_rows = versions.get(SCORE_BOARD_VERSION, 0)
+        print(f"Cache rows for current version {SCORE_BOARD_VERSION!r}: {version_rows:,}")
     except Exception as e:
         print(f"Could not read cache version counts from DB: {e}")
 
+    def _print_load_progress(loaded: int, total: int) -> None:
+        if total > 0:
+            width = 34
+            ratio = min(1.0, loaded / total)
+            filled = int(width * ratio)
+            bar = "#" * filled + "-" * (width - filled)
+            print(
+                f"\rLoading cache: [{bar}] {loaded:,}/{total:,} ({ratio*100:5.1f}%)",
+                end="",
+                flush=True,
+            )
+        else:
+            print(f"\rLoading cache: {loaded:,} rows", end="", flush=True)
+
     t_load = time.time()
-    cached = db.load_version(SCORE_BOARD_VERSION)
+    cached = db.load_version(
+        SCORE_BOARD_VERSION,
+        progress_cb=_print_load_progress,
+        total_rows=version_rows,
+    )
+    print()
     if cached:
         load_trans_table(cached)
         print(f"Loaded {len(cached):,} cached score_board entries  "
@@ -317,16 +371,22 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
         print(f"  Summary — {num_games} game(s)")
         print(f"{'='*60}")
         print(f"{'Game':>5}  {'Score':>7}  {'Best':>7}  {'MaxTile':>8}  "
-              f"{'Moves':>6}  {'CacheHit%':>9}  Powers(S/D)")
-        print("-" * 68)
+              f"{'Moves':>6}  {'CacheHit%':>9}  {'Depth mean/p25/p50/p75':>25}  Powers(S/D)")
+        print("-" * 96)
         for s in all_stats:
             pu = s.get("powers_used", {})
             total = s["cache_hits"] + s["cache_misses"]
             hr = s["cache_hits"] / total * 100 if total else 0.0
+            depth_tuple = (
+                f"{s.get('depth_mean', 0.0):.2f}/"
+                f"{s.get('depth_p25', 0.0):.2f}/"
+                f"{s.get('depth_p50', 0.0):.2f}/"
+                f"{s.get('depth_p75', 0.0):.2f}"
+            )
             print(
                 f"{s['game']:>5}  {s['score']:>7}  {s['best']:>7}  "
                 f"{s['max_tile']:>8}  {s['moves']:>6}  "
-                f"{hr:>8.1f}%  "
+                f"{hr:>8.1f}%  {depth_tuple:>25}  "
                 f"S={pu.get('swap',0)} D={pu.get('delete',0)}"
             )
 

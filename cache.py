@@ -14,6 +14,7 @@ _to_signed / _from_signed helpers and reconstruct the unsigned value on read.
 
 import os
 import sqlite3
+from collections.abc import Callable
 
 _DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "cache", "transposition.db")
 _SHARED_DB_PATH = os.path.expanduser("~/Code/transposition.db")
@@ -128,29 +129,59 @@ def init_db() -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def load_version(version: str) -> dict:
+def load_version(
+    version: str,
+    progress_cb: Callable[[int, int], None] | None = None,
+    batch_size: int = 200_000,
+    total_rows: int | None = None,
+) -> dict:
     """Load all cached entries for *version* into a dict keyed by
-    (board_bb, swap_uses, delete_uses) → score.  Returns {} if DB is absent."""
+    (board_bb, swap_uses, delete_uses) → score.  Returns {} if DB is absent.
+
+    progress_cb receives (loaded_rows, total_rows) after each batch.
+    """
     if not os.path.exists(DB_PATH):
         return {}
+    batch = max(1, int(batch_size))
     conn = _connect_ro()
     try:
         _set_common_pragmas(conn)
         try:
-            rows = conn.execute(
+            if total_rows is None:
+                total_rows = conn.execute(
+                    "SELECT COUNT(*) FROM entries WHERE version = ?",
+                    (version,),
+                ).fetchone()[0]
+            cur = conn.execute(
                 "SELECT board_bb, swap_uses, delete_uses, score FROM entries WHERE version = ?",
                 (version,),
-            ).fetchall()
+            )
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return {}
             raise
+        loaded = 0
+        out: dict[tuple[int, int, int], float] = {}
+        while True:
+            rows = cur.fetchmany(batch)
+            if not rows:
+                break
+            for bb, su, du, score in rows:
+                out[(_from_signed(bb), su, du)] = score
+            loaded += len(rows)
+            if progress_cb is not None:
+                try:
+                    progress_cb(loaded, total_rows)
+                except Exception:
+                    pass
+        if progress_cb is not None and loaded == 0:
+            try:
+                progress_cb(0, total_rows or 0)
+            except Exception:
+                pass
+        return out
     finally:
         conn.close()
-    return {
-        (_from_signed(bb), su, du): score
-        for bb, su, du, score in rows
-    }
 
 
 def save_entries(entries: dict, version: str) -> int:

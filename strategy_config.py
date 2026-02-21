@@ -31,9 +31,13 @@ class DepthPolicy:
     surgery_valid_threshold: int = 3
     surgery_rough_threshold: float = 0.9
     surgery_bonus: float = 0.40
+    # Extra nudge for tight boards that usually need longer tactical search.
+    tight_empties_threshold: int = 4
+    tight_valid_threshold: int = 3
+    tight_bonus: float = 0.30
     near_death_empties_threshold: int = 1
-    # Depth-6 should be rare: require only one legal move remaining.
-    near_death_valid_threshold: int = 1
+    # Depth-6 should remain rare, but allow two-move late-game traps.
+    near_death_valid_threshold: int = 2
     near_death_rough_threshold: float = 0.95
     near_death_max_log_threshold: float = 11.0
 

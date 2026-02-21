@@ -101,6 +101,8 @@ def auto_depth(board: list[list[int]]) -> int:
         and rough_n >= p.surgery_rough_threshold
     ):
         score += p.surgery_bonus
+    if empties <= p.tight_empties_threshold and valid <= p.tight_valid_threshold:
+        score += p.tight_bonus
 
     depth = max(p.min_depth, min(p.soft_max, int(round(score))))
     if (

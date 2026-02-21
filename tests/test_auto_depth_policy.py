@@ -23,10 +23,10 @@ class TestAutoDepthPolicy(unittest.TestCase):
             "mid_game": 4,
             "swap_test": 4,
             "corner_trap": 4,
-            "messy_lowmax": 4,
+            "messy_lowmax": 5,
             "high_tile_sparse": 4,
             "jammed": 5,
-            "late_game": 5,
+            "late_game": 6,
         }
         for name, depth in expected.items():
             with self.subTest(fixture=name):
