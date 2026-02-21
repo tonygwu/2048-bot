@@ -43,6 +43,11 @@ python3 tests/run.py mid_game --moves 20 --depth 4 --seed 42
 python3 tests/run.py jammed --scores          # print expectimax score per direction
 python3 tests/run.py swap_test --peek         # show only the first action, then stop
 python3 tests/run.py late_game --no-random    # skip tile placement (pure decision trace)
+
+# Depth calibration benchmark (no browser required)
+.venv/bin/python benchmark_depth.py
+.venv/bin/python benchmark_depth.py --moves 15 --seeds 3         # quick pass
+.venv/bin/python benchmark_depth.py --depths 3,4,5,6 --seeds 8   # deeper comparison
 ```
 
 ### Board fixtures (`tests/boards/*.json`)
