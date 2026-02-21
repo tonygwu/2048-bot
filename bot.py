@@ -232,6 +232,14 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
     print(f"Launching 2048 bot  (depth={label}, games={num_games}, headless={headless})")
 
     # ── Load transposition table from DB ──────────────────────────────────────
+    print(f"Cache DB path: {db.DB_PATH}")
+    try:
+        versions = db.list_versions()
+        print(f"Cache rows for current version {SCORE_BOARD_VERSION!r}: "
+              f"{versions.get(SCORE_BOARD_VERSION, 0):,}")
+    except Exception as e:
+        print(f"Could not read cache version counts from DB: {e}")
+
     t_load = time.time()
     cached = db.load_version(SCORE_BOARD_VERSION)
     if cached:
