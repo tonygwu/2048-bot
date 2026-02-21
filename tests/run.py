@@ -37,13 +37,14 @@ from strategy import (
     _expectimax,
 )
 # Inline the depth schedule from bot.py so we don't transitively import playwright.
+# Keep in sync with _DEPTH_SCHEDULE / _DEPTH_MAX in bot.py.
 _DEPTH_SCHEDULE = [
-    ( 512, 2),
-    (1024, 3),
-    (2048, 4),
-    (4096, 5),
+    ( 512, 2),   # max_tile <  512 → depth 2
+    (2048, 3),   # max_tile < 2048 → depth 3
+    (4096, 4),   # max_tile < 4096 → depth 4
+    (8192, 5),   # max_tile < 8192 → depth 5
 ]
-_DEPTH_MAX = 6
+_DEPTH_MAX = 6   # max_tile >= 8192
 
 
 def auto_depth(max_tile: int) -> int:
