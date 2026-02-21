@@ -1,12 +1,13 @@
 """Transposition cache for strategy score_board lookups."""
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 
 
 @dataclass
 class TranspositionCache:
     cap: int = 500_000
-    table: dict = field(default_factory=dict)
+    table: OrderedDict = field(default_factory=OrderedDict)
     new_entries: dict = field(default_factory=dict)
     hits: int = 0
     misses: int = 0
@@ -18,22 +19,31 @@ class TranspositionCache:
         self.keep_oversized_preload = len(self.table) > self.cap
 
     def get(self, key):
-        val = self.table.get(key)
-        if val is None:
+        if key not in self.table:
             self.misses += 1
             return None
+        # LRU touch on successful read.
+        self.table.move_to_end(key, last=True)
+        val = self.table[key]
         self.hits += 1
         return val
 
     def store(self, key, value: float) -> None:
         """Store result and track newly added entries for DB flush."""
+        if key in self.table:
+            # Update existing entry and mark it as most recently used.
+            self.table[key] = value
+            self.table.move_to_end(key, last=True)
+            self.new_entries[key] = value
+            return
+
         if len(self.table) >= self.cap:
             if self.keep_oversized_preload:
                 # Preserve huge preloads: do not insert more in-memory keys.
                 self.new_entries[key] = value
                 return
-            self.table.clear()
-            self.keep_oversized_preload = False
+            # Evict exactly one least-recently-used entry.
+            self.table.popitem(last=False)
         self.table[key] = value
         self.new_entries[key] = value
 

@@ -14,13 +14,25 @@ class TestTranspositionCache(unittest.TestCase):
         self.assertIsNone(c.get(("missing", 0, 0)))
         self.assertEqual(c.stats(), {"hits": 1, "misses": 1})
 
-    def test_clear_on_cap_when_not_oversized_preload(self) -> None:
+    def test_evict_lru_on_cap_when_not_oversized_preload(self) -> None:
         c = TranspositionCache(cap=2)
         c.store(("k1", 0, 0), 1.0)
         c.store(("k2", 0, 0), 2.0)
+        # Touch k1 so k2 becomes LRU.
+        self.assertEqual(c.get(("k1", 0, 0)), 1.0)
         c.store(("k3", 0, 0), 3.0)
-        self.assertEqual(len(c.table), 1)
-        self.assertEqual(c.table[("k3", 0, 0)], 3.0)
+        self.assertEqual(len(c.table), 2)
+        self.assertIn(("k1", 0, 0), c.table)
+        self.assertIn(("k3", 0, 0), c.table)
+        self.assertNotIn(("k2", 0, 0), c.table)
+
+    def test_store_existing_key_at_cap_does_not_evict(self) -> None:
+        c = TranspositionCache(cap=2)
+        c.store(("k1", 0, 0), 1.0)
+        c.store(("k2", 0, 0), 2.0)
+        c.store(("k1", 0, 0), 10.0)
+        self.assertEqual(len(c.table), 2)
+        self.assertEqual(c.table[("k1", 0, 0)], 10.0)
 
     def test_oversized_preload_is_preserved(self) -> None:
         c = TranspositionCache(cap=2)

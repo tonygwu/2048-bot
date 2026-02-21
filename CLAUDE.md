@@ -163,6 +163,7 @@ Use these definitions consistently when comparing strategy changes:
 **In-memory cache** (`strategy.py`, `transposition_cache.py`):
 - `TranspositionCache` owns cache policy and stats; `strategy.py` keeps a singleton `_TRANS_CACHE`.
 - Cache key remains `{(board_bb, swap_uses, delete_uses) → score}` with cap `_TRANS_CAP = 500_000`.
+- On cap pressure, cache eviction is LRU (no full-table clear); oversized preloads are still preserved.
 - `drain_new_entries()` still returns newly-added keys for SQLite flush after each game.
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
 - Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, the preloaded table is preserved and new lookups are not inserted into the in-memory table; they are still tracked for DB flush.
