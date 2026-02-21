@@ -31,6 +31,8 @@ Usage examples
 """
 
 import argparse
+import multiprocessing as mp
+import os
 import random
 import time
 
@@ -79,33 +81,103 @@ def _is_game_over(board: list[list[int]]) -> bool:
 
 # ── Recompute mode ────────────────────────────────────────────────────────────
 
-def cmd_recompute() -> None:
+def _score_state(task: tuple[int, int, int]) -> tuple[tuple[int, int, int], float]:
+    """Worker helper: score one (board_bb, swap_uses, delete_uses) state."""
+    bb, su, du = task
+    board = db.decode_board(bb)
+    powers = {"swap": su, "delete": du}
+    score = score_board(board, powers)
+    key = (board_to_bb(board), su, du)
+    return key, score
+
+
+def _fmt_eta(seconds: float) -> str:
+    if seconds <= 0:
+        return "0s"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+def cmd_recompute(
+    workers: int,
+    write_chunk: int,
+    progress_every: int,
+    only_missing_current: bool,
+    limit: int | None,
+    offset: int,
+) -> None:
     """Recompute score_board for all states in the DB under SCORE_BOARD_VERSION."""
-    states = db.get_all_states()   # all versions
-    if not states:
+    tasks = db.get_recompute_states(
+        current_version=SCORE_BOARD_VERSION,
+        only_missing_current=only_missing_current,
+        limit=limit,
+        offset=offset,
+    )
+    if not tasks:
         print("DB is empty — nothing to recompute.")
         return
+    total = len(tasks)
+    workers = max(0, workers)
+    if workers == 0:
+        workers = max(1, (os.cpu_count() or 1) - 1)
+    write_chunk = max(1, write_chunk)
+    progress_every = max(1, progress_every)
 
-    # Deduplicate by (board_bb, swap_uses, delete_uses) — keep one per key
-    unique: dict[tuple, tuple] = {}
-    for bb, su, du, _ver, _sc in states:
-        unique[(bb, su, du)] = (bb, su, du)
-
-    print(f"Recomputing {len(unique):,} unique states as version {SCORE_BOARD_VERSION!r}…")
+    mode = "missing-current only" if only_missing_current else "all states"
+    limit_str = "none" if limit is None else f"{limit:,}"
+    print(
+        f"Recomputing {total:,} unique states as version {SCORE_BOARD_VERSION!r} "
+        f"(mode={mode}, offset={offset:,}, limit={limit_str}, workers={workers}, "
+        f"write_chunk={write_chunk:,}, progress_every={progress_every:,})…"
+    )
 
     t0 = time.perf_counter()
-    entries = {}
-    for bb, su, du in unique.values():
-        board = db.decode_board(bb)
-        powers = {"swap": su, "delete": du}
-        score = score_board(board, powers)
-        key = (board_to_bb(board), su, du)
-        entries[key] = score
+    written_total = 0
+    entries: dict[tuple[int, int, int], float] = {}
+    if workers == 1:
+        iterator = (_score_state(task) for task in tasks)
+    else:
+        chunksize = max(64, min(2048, total // (workers * 50) or 64))
+        pool = mp.Pool(processes=workers)
+        iterator = pool.imap_unordered(_score_state, tasks, chunksize=chunksize)
+
+    processed = 0
+    try:
+        for key, score in iterator:
+            processed += 1
+            entries[key] = score
+
+            if len(entries) >= write_chunk:
+                written_total += db.save_entries(entries, SCORE_BOARD_VERSION)
+                entries.clear()
+
+            if processed % progress_every == 0 or processed == total:
+                elapsed = time.perf_counter() - t0
+                rate = processed / elapsed if elapsed > 0 else 0.0
+                remain = total - processed
+                eta = _fmt_eta(remain / rate) if rate > 0 else "?"
+                print(
+                    f"  {processed:,}/{total:,} ({processed / total * 100:.1f}%)  "
+                    f"{rate:,.0f} states/s  elapsed={elapsed:.1f}s  ETA={eta}",
+                    flush=True,
+                )
+
+        if entries:
+            written_total += db.save_entries(entries, SCORE_BOARD_VERSION)
+            entries.clear()
+    finally:
+        if workers != 1:
+            pool.close()
+            pool.join()
 
     elapsed = time.perf_counter() - t0
-    written = db.save_entries(entries, SCORE_BOARD_VERSION)
-    print(f"  Written {written:,} rows in {elapsed:.2f}s  "
-          f"({written / elapsed:.0f} states/s)")
+    rate = written_total / elapsed if elapsed > 0 else 0.0
+    print(f"  Written {written_total:,} rows in {elapsed:.2f}s  ({rate:,.0f} states/s)")
 
 
 # ── Generate mode ─────────────────────────────────────────────────────────────
@@ -194,10 +266,29 @@ def main() -> None:
                        help="Show row counts per version in the DB")
     parser.add_argument("--depth", type=int, default=3,
                         help="Expectimax depth for --generate (default: 3)")
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Worker processes for --recompute (0=auto, 1=single-process)")
+    parser.add_argument("--write-chunk", type=int, default=50_000,
+                        help="Rows per DB write batch in --recompute (default: 50000)")
+    parser.add_argument("--progress-every", type=int, default=50_000,
+                        help="Print progress every N states in --recompute (default: 50000)")
+    parser.add_argument("--only-missing-current", action="store_true",
+                        help="In --recompute, process only states missing the current version")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Max unique states to recompute (supports batching)")
+    parser.add_argument("--offset", type=int, default=0,
+                        help="Skip this many ordered unique states before recomputing")
     args = parser.parse_args()
 
     if args.recompute:
-        cmd_recompute()
+        cmd_recompute(
+            args.workers,
+            args.write_chunk,
+            args.progress_every,
+            args.only_missing_current,
+            args.limit,
+            args.offset,
+        )
     elif args.generate is not None:
         cmd_generate(args.generate, args.depth)
     elif args.list:

@@ -191,7 +191,8 @@ Use these definitions consistently when comparing strategy changes:
 
 **Versioning** — **CRITICAL**:
 - `SCORE_BOARD_VERSION` in `strategy.py` must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
-- Old version rows remain in the DB but are ignored; `populate_cache.py --recompute` re-scores them under the new version.
+- After bumping `SCORE_BOARD_VERSION`, immediately run `.venv/bin/python populate_cache.py --recompute` so the shared DB is refreshed for the latest version.
+- Old version rows remain in the DB but are ignored by runtime loads.
 
 **`populate_cache.py`** — Cache seeding/maintenance:
 ```bash

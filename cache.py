@@ -134,6 +134,64 @@ def get_all_states(version: str | None = None) -> list[tuple]:
     return [(_from_signed(bb), su, du, v, sc) for bb, su, du, v, sc in rows]
 
 
+def get_recompute_states(
+    current_version: str,
+    only_missing_current: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[tuple[int, int, int]]:
+    """Return unique (board_bb_unsigned, swap_uses, delete_uses) states for recompute.
+
+    If only_missing_current=True, return only states that do not yet have a row in
+    current_version. Results are ordered deterministically by key and support
+    optional LIMIT/OFFSET for batch processing.
+    """
+    if not os.path.exists(DB_PATH):
+        return []
+
+    lim = None if limit is None else max(0, int(limit))
+    off = max(0, int(offset))
+    conn = _connect()
+    try:
+        if only_missing_current:
+            sql = """
+                SELECT e.board_bb, e.swap_uses, e.delete_uses
+                FROM entries e
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM entries cur
+                    WHERE cur.version = ?
+                      AND cur.board_bb = e.board_bb
+                      AND cur.swap_uses = e.swap_uses
+                      AND cur.delete_uses = e.delete_uses
+                )
+                GROUP BY e.board_bb, e.swap_uses, e.delete_uses
+                ORDER BY e.board_bb, e.swap_uses, e.delete_uses
+            """
+            params: list = [current_version]
+        else:
+            sql = """
+                SELECT board_bb, swap_uses, delete_uses
+                FROM entries
+                GROUP BY board_bb, swap_uses, delete_uses
+                ORDER BY board_bb, swap_uses, delete_uses
+            """
+            params = []
+
+        if lim is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([lim, off])
+        elif off > 0:
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(off)
+
+        rows = conn.execute(sql, tuple(params)).fetchall()
+    finally:
+        conn.close()
+
+    return [(_from_signed(bb), su, du) for bb, su, du in rows]
+
+
 def decode_board(bb: int) -> list[list[int]]:
     """Decode a bitboard back to a 4x4 list[list[int]] (tile values, not exponents)."""
     board = []

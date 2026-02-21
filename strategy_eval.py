@@ -215,6 +215,11 @@ def score_from_features(features: EvalFeatures, weights: EvalWeights = DEFAULT_E
 
 
 def score_board(board: list[list[int]], powers: dict | None = None) -> float:
+    """Static evaluation for a board/power state.
+
+    If this function's logic or weights change, bump SCORE_BOARD_VERSION and run
+    `populate_cache.py --recompute` so SQLite contains scores for the new version.
+    """
     if powers is None:
         powers = {}
     key = (board_to_bb(board), powers.get("swap", 0), powers.get("delete", 0))
