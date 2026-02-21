@@ -1,0 +1,12 @@
+{
+  "name": "early_game",
+  "description": "Typical early-game position, max tile 32. Tests basic move ordering.",
+  "board": [
+    [  4, 16, 32,  0],
+    [  2,  8,  4,  2],
+    [  0,  4,  2,  0],
+    [  0,  0,  0,  2]
+  ],
+  "score": 420,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

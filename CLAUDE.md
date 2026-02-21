@@ -29,6 +29,46 @@ python3 -m venv .venv
 
 # Sanity-check that swap/delete power-ups work in browser
 .venv/bin/python test_powers.py
+
+# ── Strategy test harness (no browser required) ───────────────────────────────
+# List all fixture boards
+python3 tests/run.py
+
+# Run 10 moves on a fixture (auto depth, random tile spawns)
+python3 tests/run.py mid_game
+
+# Common flag combinations
+python3 tests/run.py mid_game --moves 20 --depth 4 --seed 42
+python3 tests/run.py jammed --scores          # print expectimax score per direction
+python3 tests/run.py swap_test --peek         # show only the first action, then stop
+python3 tests/run.py late_game --no-random    # skip tile placement (pure decision trace)
+```
+
+### Board fixtures (`tests/boards/*.json`)
+
+| File | max tile | Notes |
+|------|----------|-------|
+| `early_game` | 32 | Basic move ordering |
+| `mid_game` | 512 | Snake gradient heuristic |
+| `late_game` | 2048 | Deep search, monotonicity |
+| `jammed` | 1024 | Delete power-up (D=1) |
+| `swap_test` | 1024 | Swap power-up (S=1) |
+| `corner_trap` | 512 | Misaligned snake, recovery |
+
+**Board JSON format** — add new fixtures in `tests/boards/`:
+```json
+{
+  "name": "my_test",
+  "description": "What this tests",
+  "board": [
+    [1024, 512, 256, 128],
+    [  32,  64,  32,  16],
+    [   4,   8,   4,   2],
+    [   0,   2,   0,   0]
+  ],
+  "score": 30000,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}
 ```
 
 ## Architecture

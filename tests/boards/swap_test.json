@@ -1,0 +1,12 @@
+{
+  "name": "swap_test",
+  "description": "1024 in corner, 512 stranded at (3,2) with snake weight 3 instead of (0,1) with weight 15. Swap power-up available.",
+  "board": [
+    [1024, 256, 128, 64],
+    [  16,  32,   8,  4],
+    [   2,   0,   0,  0],
+    [   0,   0, 512,  0]
+  ],
+  "score": 18500,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "jammed",
+  "description": "Nearly-full board with small clutter tiles. Delete power-up available — bot should consider using it.",
+  "board": [
+    [1024, 512,  64,  8],
+    [  32,  64,  32,  4],
+    [  16,   8,  16,  2],
+    [   4,   2,   4,  0]
+  ],
+  "score": 22000,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "mid_game",
+  "description": "Mid-game with 512 max tile and a decent snake pattern forming. Tests gradient heuristic.",
+  "board": [
+    [512, 256,  64, 16],
+    [  4,  32,   8,  4],
+    [  2,   0,   2,  0],
+    [  0,   0,   0,  0]
+  ],
+  "score": 7200,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

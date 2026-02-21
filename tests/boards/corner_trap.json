@@ -1,0 +1,12 @@
+{
+  "name": "corner_trap",
+  "description": "Largest tile (512) stuck in bottom-right corner instead of top-left. Tests whether heuristic punishes misaligned snake pattern.",
+  "board": [
+    [  0,   8,  16,  64],
+    [  2,   4,  32, 128],
+    [  0,   2,   8, 256],
+    [  0,   0,   4, 512]
+  ],
+  "score": 9000,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "late_game",
+  "description": "Late-game with 2048 tile in the corner. Tests deep search with large tiles and monotonicity.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [  64,  128,  64,  32],
+    [  16,   32,  16,   4],
+    [   2,    4,   2,   0]
+  ],
+  "score": 48200,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}
