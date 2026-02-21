@@ -113,13 +113,19 @@ _SNAKE = [
     [ 1,  2,  3,  4],
 ]
 
-_W_EMPTY = 270.0   # raw empty-cell count
-_W_GRAD  =   2.2   # snake-gradient coefficient
-_W_MONO  =  47.0   # monotonicity (penalty-based; higher = more monotone)
-_W_ROUGH =  35.0   # roughness penalty (subtracted)
-_W_MERGE =  65.0   # near-term merge potential
-_W_MAX   = 120.0   # explicit max-tile push (log2 of max tile)
-_W_SCORE =   1.0   # score proxy (sum of tile values; keep small)
+_W_EMPTY  = 270.0   # raw empty-cell count
+_W_GRAD   =   2.2   # snake-gradient coefficient
+_W_MONO   =  47.0   # monotonicity (penalty-based; higher = more monotone)
+_W_ROUGH  =  35.0   # roughness penalty (subtracted)
+_W_MERGE  =  65.0   # near-term merge potential
+_W_MAX    = 120.0   # explicit max-tile push (log2 of max tile)
+_W_SCORE  =   1.0   # score proxy (sum of tile values; keep small)
+_W_CORNER =  80.0   # bonus per log2(max_tile) when max tile sits at (0,0)
+
+# Row directions required by the snake pattern:
+#   rows 0, 2 → tiles should DECREASE left→right (weights 16↘13 and 8↘5)
+#   rows 1, 3 → tiles should INCREASE left→right (weights 9↗12 and 1↗4)
+_SNAKE_ROW_SHOULD_DECREASE = [True, False, True, False]
 
 # ── Power-up valuation ─────────────────────────────────────────────────────────
 #
@@ -127,14 +133,12 @@ _W_SCORE =   1.0   # score proxy (sum of tile values; keep small)
 # so value scales with game stage (later = scarcer board, higher rescue value).
 #
 # "Effective uses" = actual_uses + proximity_bonus, where proximity_bonus ∈ [0, 1)
-# represents how close the board is to earning the next use from the game
-# (swap unlocks at 256, delete at 512).  The bonus is zeroed out when uses
-# are already at the cap, which creates a natural incentive to spend a power-up
-# right before earning a replacement — you go from (cap, near-cap-ignored) to
-# (cap-1, near-cap-counts ≈ 0.9) and the board improvement only needs to cover
-# the small residual gap.
-_W_PU_BASE        = 100.0   # heuristic units per effective use, per log2(max_tile)
-_PU_DELETE_SCALE  =   1.2   # delete is slightly more valuable than swap
+# models how close the board is to earning the next use (swap unlocks at 256,
+# delete at 512).  Proximity is only counted while max_tile < unlock_tile;
+# once the threshold is passed the tree itself will see the earned use in
+# future boards — carrying a phantom 0.95 "inventory" forever was stale signal.
+_W_PU_BASE        =  40.0   # heuristic units per effective use, per log2(max_tile)
+_PU_DELETE_SCALE  =   2.0   # delete costs more to spend (removes ALL tiles of value)
 _MAX_SWAP_USES    =   2     # game caps storable swap uses at 2
 _MAX_DELETE_USES  =   2     # game caps storable delete uses at 2
 _SWAP_UNLOCK_TILE =  256    # creating a 256 tile earns a swap use
@@ -155,21 +159,28 @@ def _gradient(board: list[list[int]]) -> float:
 def _monotonicity(board: list[list[int]]) -> float:
     """Penalty-based monotonicity.
 
-    For each row/column we compute the sum of log-drops in both possible
-    directions, then keep the *smaller* penalty (the direction the row is
-    closer to being monotone in).  Summed over all rows + cols and negated,
-    so the return value is 0 for a perfectly monotone board and increasingly
-    negative for non-monotone layouts.
+    Rows: direction-aware — each row has a required monotone direction dictated
+    by the snake pattern (_SNAKE_ROW_SHOULD_DECREASE).  Only penalise violations
+    of that specific direction; never reward going the wrong way.
+
+    Columns: agnostic — take the smaller penalty across both up and down, since
+    the snake winds vertically and the preferred column direction is less fixed.
+
+    Return value: 0 for a perfectly monotone board, increasingly negative for
+    non-monotone layouts.
     """
     total = 0.0
     for r in range(4):
-        left_pen = right_pen = 0.0
+        pen = 0.0
+        should_decrease = _SNAKE_ROW_SHOULD_DECREASE[r]
         for c in range(3):
             la = math.log2(board[r][c])     if board[r][c]     > 0 else 0.0
             lb = math.log2(board[r][c + 1]) if board[r][c + 1] > 0 else 0.0
-            left_pen  += max(0.0, la - lb)   # drop going left→right
-            right_pen += max(0.0, lb - la)   # drop going right→left
-        total += min(left_pen, right_pen)
+            if should_decrease:
+                pen += max(0.0, lb - la)   # penalise increases left→right
+            else:
+                pen += max(0.0, la - lb)   # penalise decreases left→right
+        total += pen
 
     for c in range(4):
         up_pen = down_pen = 0.0
@@ -237,17 +248,20 @@ def _merge_potential(board: list[list[int]]) -> float:
 def _proximity_to_unlock(max_tile: int, unlock_tile: int) -> float:
     """Fraction of the way to the next power-up unlock, in log2-space.
 
-    Returns a value in [0, 0.95).  Capped below 1 so it never fully equals
-    an earned use — only the actual powers dict can do that.
+    Returns a value in [0, 0.95) while max_tile < unlock_tile, then 0 once
+    the threshold is passed.  Once max_tile >= unlock_tile the game has already
+    awarded the use; future re-awards happen as new tiles are created and will
+    be reflected in the powers dict directly.  Carrying a phantom 0.95 bonus
+    forever was stale, direction-less signal.
 
     Examples (swap unlock = 256):
       max_tile=128 → log2(128)/log2(256) = 7/8 = 0.875
       max_tile= 64 → 6/8 = 0.75
-      max_tile=256 → capped at 0.95  (you've reached/passed the threshold)
+      max_tile≥256 → 0.0  (threshold passed; tree handles future awards)
     """
-    if max_tile <= 0:
+    if max_tile <= 0 or max_tile >= unlock_tile:
         return 0.0
-    return min(0.95, math.log2(max_tile) / math.log2(unlock_tile))
+    return math.log2(max_tile) / math.log2(unlock_tile)
 
 
 def _powerup_value(max_tile: int, powers: dict) -> float:
@@ -292,6 +306,9 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     max_val = max(board[r][c] for r in range(4) for c in range(4))
     tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
 
+    corner_bonus = (_W_CORNER * math.log2(max_val)
+                    if max_val > 0 and board[0][0] == max_val else 0.0)
+
     return (
           _W_EMPTY *  empties
         + _W_GRAD  * _gradient(board)
@@ -300,6 +317,7 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
         + _W_MERGE * _merge_potential(board)
         + _W_MAX   * (math.log2(max_val) if max_val > 0 else 0.0)
         + _W_SCORE * tile_sum
+        + corner_bonus
         + _powerup_value(max_val, powers)
     )
 
