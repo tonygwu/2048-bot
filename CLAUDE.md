@@ -51,6 +51,9 @@ python3 tests/run.py late_game --no-random    # skip tile placement (pure decisi
 
 # Phase-1 regression checks for strategy action APIs
 python3 -m unittest tests/test_strategy_actions.py
+
+# Phase-2/3 regression checks (eval decomposition + cache policy)
+python3 -m unittest tests/test_strategy_eval.py tests/test_transposition_cache.py
 ```
 
 ### Board fixtures (`tests/boards/*.json`)
@@ -99,6 +102,7 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 - `best_action_obj(board, powers, depth)` evaluates all regular moves plus swap/delete power-ups and returns typed actions: `MoveAction`, `SwapAction`, `DeleteAction`.
 - `best_action(board, powers, depth)` is the backwards-compatible tuple wrapper over `best_action_obj`: `("move", dir)`, `("swap", r1,c1,r2,c2)`, or `("delete", value, row, col)`.
 - `_expectimax(board, depth, is_max, powers)`: max nodes try all 4 directions; chance nodes place 2 (90%) or 4 (10%) in empty cells. When more than 6 cells are empty, cells are subsampled to cap branching. `powers` is threaded through unchanged (no power-ups are used within the tree).
+- Phase-2 eval decomposition: `extract_eval_features(board, powers)` computes raw features and `score_from_features(features, weights)` applies `EvalWeights`. `score_board` now delegates to these.
 - `score_board(board, powers)` is cached by `(board_bb, swap_uses, delete_uses)` and currently uses: empty cells, snake gradient, direction-aware monotonicity (rows follow snake direction), roughness (subtracted), merge potential, max tile log2, `log2(sum_tiles+1)`, legal move count, corner bonus when max tile is at `(0,0)`, and power-up value.
 - Power-up proximity is intentionally damped/gated: swap proximity starts at max tile `>=128`, delete proximity at `>=256`, each scaled by `0.25`, and proximity goes to `0` once unlock threshold is reached (`256`/`512`) so the heuristic does not carry phantom inventory.
 - Snake weight matrix puts upper-left corner at weight 16, zigzagging down to 1 at lower-left.
@@ -113,11 +117,12 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 
 `score_board` results are cached to avoid recomputing the same board position multiple times within and across game runs.
 
-**In-memory cache** (`strategy.py`):
-- `_TRANS_TABLE`: `{(board_bb, swap_uses, delete_uses) → score}`. Normally cleared (LRU-free eviction) when it reaches `_TRANS_CAP` (500 000 entries).
-- `_NEW_ENTRIES`: same keys, only entries added in the current run — drained after each game and flushed to SQLite.
+**In-memory cache** (`strategy.py`, `transposition_cache.py`):
+- `TranspositionCache` owns cache policy and stats; `strategy.py` keeps a singleton `_TRANS_CACHE`.
+- Cache key remains `{(board_bb, swap_uses, delete_uses) → score}` with cap `_TRANS_CAP = 500_000`.
+- `drain_new_entries()` still returns newly-added keys for SQLite flush after each game.
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
-- Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, `_TRANS_TABLE` is preserved and new lookups are not inserted into memory; they are still tracked in `_NEW_ENTRIES` and flushed to SQLite.
+- Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, the preloaded table is preserved and new lookups are not inserted into the in-memory table; they are still tracked for DB flush.
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
 - Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.
@@ -151,22 +156,23 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 - `_roughness` must guard `if v <= 0: continue` (not just `== 0`) because board values are never negative but the guard matters for correctness.
 - Monotonicity is penalty-based and mixed-direction: rows are direction-aware (must follow snake direction), columns still use the minimum penalty across both directions, then negate.
 - `new_game()` tries several button text variants and falls back to force-click + Escape to handle the post-game-over overlay.
+- Shared simulation helper `sim_utils.place_random_tile(...)` is used by both `tests/run.py` and `benchmark_depth.py`; keep spawn semantics there to avoid drift.
 
 ## Refactor Roadmap
 
 This section tracks active refactor phases so agents can align changes without re-discovering intent.
 
-### Phase 1 (low risk, in progress): typed actions + regression tests
+### Phase 1 (low risk, complete): typed actions + regression tests
 - Introduce typed action models in `strategy.py` (`MoveAction`, `SwapAction`, `DeleteAction`) and a new `best_action_obj(...)` API.
 - Keep `best_action(...)` tuple API for backward compatibility; it wraps typed actions.
 - Deterministic regression checks live in `tests/test_strategy_actions.py` (tuple back-compat + fixture action expectations).
 
-### Phase 2 (medium risk): evaluation decomposition
-- Split `score_board` into `extract_features(...)` + weighted scorer.
+### Phase 2 (medium risk, complete): evaluation decomposition
+- Split `score_board` into `extract_eval_features(...)` + weighted scorer (`score_from_features(...)`).
 - Keep transposition-key semantics stable and preserve current behavior behind tests.
 - Move heuristic weights to a central config object (still loaded in-process by default).
 
-### Phase 3 (higher leverage): cache/search modularization
+### Phase 3 (higher leverage, in progress): cache/search modularization
 - Extract transposition-table behavior into a dedicated cache component with explicit policies (cap, preload, flush semantics).
-- Remove duplicated simulation/depth-schedule logic across scripts by introducing shared harness utilities.
+- Remove duplicated simulation/depth-schedule logic across scripts by introducing shared harness utilities (`sim_utils.py` done for tile-spawn path).
 - Add CI quality gates (`ruff`, unit tests, targeted benchmark smoke checks) before larger search optimizations.

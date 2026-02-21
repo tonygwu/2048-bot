@@ -25,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+from sim_utils import place_random_tile
 from strategy import (
     DIRECTIONS,
     apply_delete,
@@ -32,7 +33,6 @@ from strategy import (
     apply_swap,
     auto_depth,
     best_action,
-    empty_cells,
     is_game_over,
     score_board,
     _expectimax,
@@ -111,20 +111,6 @@ def list_boards() -> None:
             print(f"  {b.stem:<20}  max={max_tile:>5}  score={score:>6}{pu_str}  {desc}")
         except Exception as e:
             print(f"  {b.stem}  (parse error: {e})")
-
-
-# ── Simulation helpers ────────────────────────────────────────────────────────
-
-def place_random_tile(board: list[list[int]], rng: random.Random) -> list[list[int]]:
-    """Spawn a 2 (90%) or 4 (10%) in a random empty cell. Returns new board."""
-    empties = empty_cells(board)
-    if not empties:
-        return board
-    r, c = rng.choice(empties)
-    value = 2 if rng.random() < 0.9 else 4
-    nb = [row[:] for row in board]
-    nb[r][c] = value
-    return nb
 
 
 def direction_scores(board: list[list[int]], depth: int) -> list[tuple[str, float | None]]:

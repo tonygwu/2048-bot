@@ -10,6 +10,7 @@ Key functions:
 
 import math
 from dataclasses import dataclass
+from transposition_cache import TranspositionCache
 
 DIRECTIONS = ["up", "down", "left", "right"]
 
@@ -71,11 +72,8 @@ def action_from_tuple(action: ActionTuple | None) -> Action | None:
 # The SQLite cache stores scores per-version; stale entries are ignored.
 SCORE_BOARD_VERSION = "1.1"
 
-_TRANS_TABLE: dict = {}      # (board_bb, swap_uses, delete_uses) → score
-_NEW_ENTRIES: dict = {}      # same keys — entries added this run (for DB flush)
-_TRANS_STATS = {"hits": 0, "misses": 0}
 _TRANS_CAP   = 500_000       # evict (clear all) when table grows beyond this
-_KEEP_OVERSIZED_PRELOAD = False  # preserve huge DB preloads instead of nuking on first miss
+_TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
 
 
 def board_to_bb(board: list[list[int]]) -> int:
@@ -91,27 +89,22 @@ def board_to_bb(board: list[list[int]]) -> int:
 
 def load_trans_table(entries: dict) -> None:
     """Bulk-load pre-computed entries into _TRANS_TABLE (called at bot startup)."""
-    _TRANS_TABLE.update(entries)
-    global _KEEP_OVERSIZED_PRELOAD
-    _KEEP_OVERSIZED_PRELOAD = len(_TRANS_TABLE) > _TRANS_CAP
+    _TRANS_CACHE.load(entries)
 
 
 def drain_new_entries() -> dict:
     """Return and clear the set of entries added since the last drain (for DB flush)."""
-    out = dict(_NEW_ENTRIES)
-    _NEW_ENTRIES.clear()
-    return out
+    return _TRANS_CACHE.drain_new_entries()
 
 
 def get_trans_stats() -> dict:
     """Return a copy of the current hit/miss counters."""
-    return dict(_TRANS_STATS)
+    return _TRANS_CACHE.stats()
 
 
 def reset_trans_stats() -> None:
     """Zero the hit/miss counters (call between games)."""
-    _TRANS_STATS["hits"] = 0
-    _TRANS_STATS["misses"] = 0
+    _TRANS_CACHE.reset_stats()
 
 # ── Game simulation ────────────────────────────────────────────────────────────
 
@@ -287,15 +280,35 @@ _SNAKE = [
     [ 1,  2,  3,  4],
 ]
 
-_W_EMPTY  = 270.0   # raw empty-cell count
-_W_GRAD   =   2.2   # snake-gradient coefficient
-_W_MONO   =  47.0   # monotonicity (penalty-based; higher = more monotone)
-_W_ROUGH  =  35.0   # roughness penalty (subtracted)
-_W_MERGE  =  65.0   # near-term merge potential
-_W_MAX    = 120.0   # explicit max-tile push (log2 of max tile)
-_W_SUMLOG = 140.0   # compressed tile-mass signal: log2(sum tiles + 1)
-_W_MOB    =  95.0   # legal move count (0..4), favors robust/maneuverable states
-_W_CORNER =  80.0   # bonus per log2(max_tile) when max tile sits at (0,0)
+@dataclass(frozen=True)
+class EvalWeights:
+    empty: float = 270.0
+    gradient: float = 2.2
+    monotonicity: float = 47.0
+    roughness: float = 35.0
+    merge_potential: float = 65.0
+    max_tile_log: float = 120.0
+    sum_log: float = 140.0
+    mobility: float = 95.0
+    corner: float = 80.0
+    powerup: float = 1.0
+
+
+@dataclass(frozen=True)
+class EvalFeatures:
+    empties: int
+    gradient: float
+    monotonicity: float
+    roughness: float
+    merge_potential: float
+    max_log: float
+    sum_log: float
+    legal_moves: int
+    corner_max_log: float
+    powerup_value: float
+
+
+DEFAULT_EVAL_WEIGHTS = EvalWeights()
 
 # Row directions required by the snake pattern:
 #   rows 0, 2 → tiles should DECREASE left→right (weights 16↘13 and 8↘5)
@@ -484,6 +497,45 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
     return value_per_swap * effective_swaps + value_per_delete * effective_deletes
 
 
+def extract_eval_features(board: list[list[int]], powers: dict | None = None) -> EvalFeatures:
+    """Extract raw evaluation features from a board state."""
+    if powers is None:
+        powers = {}
+    empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
+    max_val = max(board[r][c] for r in range(4) for c in range(4))
+    tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
+    max_log = math.log2(max_val) if max_val > 0 else 0.0
+    corner_max_log = max_log if max_val > 0 and board[0][0] == max_val else 0.0
+    return EvalFeatures(
+        empties=empties,
+        gradient=_gradient(board),
+        monotonicity=_monotonicity(board),
+        roughness=_roughness(board),
+        merge_potential=_merge_potential(board),
+        max_log=max_log,
+        sum_log=math.log2(tile_sum + 1.0),
+        legal_moves=_legal_move_count(board),
+        corner_max_log=corner_max_log,
+        powerup_value=_powerup_value(max_val, powers),
+    )
+
+
+def score_from_features(features: EvalFeatures, weights: EvalWeights = DEFAULT_EVAL_WEIGHTS) -> float:
+    """Compute scalar board score from raw features and a weight set."""
+    return (
+          weights.empty * features.empties
+        + weights.gradient * features.gradient
+        + weights.monotonicity * features.monotonicity
+        - weights.roughness * features.roughness
+        + weights.merge_potential * features.merge_potential
+        + weights.max_tile_log * features.max_log
+        + weights.sum_log * features.sum_log
+        + weights.mobility * features.legal_moves
+        + weights.corner * features.corner_max_log
+        + weights.powerup * features.powerup_value
+    )
+
+
 def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     """Static evaluation of a board position (higher = better for the player).
 
@@ -491,7 +543,7 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     When supplied, the power-up value is folded into the score so the search
     tree naturally prices spending a use.
 
-    Results are cached in _TRANS_TABLE keyed by (board_bb, swap_uses, delete_uses).
+    Results are cached by (board_bb, swap_uses, delete_uses).
     """
     if powers is None:
         powers = {}
@@ -500,45 +552,13 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     bb  = board_to_bb(board)
     key = (bb, swap_uses, delete_uses)
 
-    cached = _TRANS_TABLE.get(key)
+    cached = _TRANS_CACHE.get(key)
     if cached is not None:
-        _TRANS_STATS["hits"] += 1
         return cached
 
-    _TRANS_STATS["misses"] += 1
-
-    empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
-    max_val = max(board[r][c] for r in range(4) for c in range(4))
-    tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
-    legal_moves = _legal_move_count(board)
-
-    corner_bonus = (_W_CORNER * math.log2(max_val)
-                    if max_val > 0 and board[0][0] == max_val else 0.0)
-
-    result = (
-          _W_EMPTY *  empties
-        + _W_GRAD  * _gradient(board)
-        + _W_MONO  * _monotonicity(board)
-        - _W_ROUGH * _roughness(board)
-        + _W_MERGE * _merge_potential(board)
-        + _W_MAX   * (math.log2(max_val) if max_val > 0 else 0.0)
-        + _W_SUMLOG * math.log2(tile_sum + 1.0)
-        + _W_MOB   * legal_moves
-        + corner_bonus
-        + _powerup_value(max_val, powers)
-    )
-
-    global _KEEP_OVERSIZED_PRELOAD
-    if len(_TRANS_TABLE) >= _TRANS_CAP:
-        if _KEEP_OVERSIZED_PRELOAD:
-            # When a large table is preloaded from SQLite, keep it intact and
-            # avoid inserting new in-memory keys once at capacity.
-            _NEW_ENTRIES[key] = result
-            return result
-        _TRANS_TABLE.clear()
-        _KEEP_OVERSIZED_PRELOAD = False
-    _TRANS_TABLE[key] = result
-    _NEW_ENTRIES[key] = result
+    features = extract_eval_features(board, powers)
+    result = score_from_features(features)
+    _TRANS_CACHE.store(key, result)
     return result
 
 
@@ -616,10 +636,10 @@ def best_action_obj(
 ) -> Action | None:
     """Evaluate all available actions (moves + power-ups) and return the best.
 
-    Return value is a tuple whose first element identifies the action:
-      ("move",   direction)
-      ("swap",   r1, c1, r2, c2)
-      ("delete", value, row, col)   # (row,col) = position of one tile with that value
+    Returns one of:
+      MoveAction(direction)
+      SwapAction(r1, c1, r2, c2)
+      DeleteAction(value, row, col)
 
     Power-up cost is priced implicitly: when a power-up is used the search
     tree receives a decremented powers dict, so score_board at every leaf

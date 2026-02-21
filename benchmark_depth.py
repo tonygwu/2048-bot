@@ -8,13 +8,14 @@ it costs in wall-clock time.
 Run:
     .venv/bin/python benchmark_depth.py
 
-The output drives the tuning of auto_depth(max_tile) in bot.py.
+The output drives depth-schedule tuning decisions in bot.py.
 """
 
 import argparse
 import random
 import time
 
+from sim_utils import place_random_tile
 from strategy import (
     apply_move,
     best_action,
@@ -126,18 +127,6 @@ BOARD_STATES: dict[str, dict] = {
 }
 
 
-# ── Simulation helpers ─────────────────────────────────────────────────────────
-
-def _place_random_tile(board: list[list[int]], rng: random.Random) -> list[list[int]]:
-    empties = [(r, c) for r in range(4) for c in range(4) if board[r][c] == 0]
-    if not empties:
-        return board
-    r, c = rng.choice(empties)
-    nb = [row[:] for row in board]
-    nb[r][c] = 4 if rng.random() < 0.1 else 2
-    return nb
-
-
 def play_from(board: list[list[int]], depth: int, n_moves: int, seed: int) -> tuple[int, float]:
     """
     Play up to n_moves moves from board at the given depth.
@@ -156,7 +145,7 @@ def play_from(board: list[list[int]], depth: int, n_moves: int, seed: int) -> tu
             nb, _, changed = apply_move(b, action[1])
             if not changed:
                 break
-            b = _place_random_tile(nb, rng)
+            b = place_random_tile(nb, rng)
         survived += 1
     return survived, score_board(b)
 
