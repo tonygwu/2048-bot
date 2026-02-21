@@ -17,8 +17,10 @@ Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import random
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -36,11 +38,13 @@ from strategy import (
     is_game_over,
     score_board,
 )
+from sim_utils import place_random_tile
 
 
 DEFAULT_MOVES = 80
 DEFAULT_SEEDS = 30
 DEFAULT_DEPTHS = [3, 4, 5]
+DEFAULT_BOOTSTRAPS = 400
 
 
 # Backwards-compatible board suite for depth tuning (folded from benchmark_depth.py).
@@ -160,14 +164,36 @@ def _load_fixture_suite(suite: str, selected_names: set[str] | None = None) -> l
     return fixtures
 
 
-def _place_random_tile(board: list[list[int]], rng: random.Random) -> list[list[int]]:
-    empties = [(r, c) for r in range(4) for c in range(4) if board[r][c] == 0]
-    if not empties:
-        return board
-    r, c = rng.choice(empties)
-    nb = [row[:] for row in board]
-    nb[r][c] = 2 if rng.random() < 0.9 else 4
-    return nb
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _bootstrap_mean_ci(
+    values: list[float],
+    n_bootstrap: int = DEFAULT_BOOTSTRAPS,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> tuple[float, float]:
+    """Return percentile CI for the mean."""
+    if not values:
+        return 0.0, 0.0
+    if len(values) == 1:
+        return values[0], values[0]
+    rng = random.Random(seed)
+    n = len(values)
+    means: list[float] = []
+    for _ in range(n_bootstrap):
+        sample = [values[rng.randrange(n)] for _ in range(n)]
+        means.append(sum(sample) / n)
+    means.sort()
+    lo_idx = max(0, int((alpha / 2.0) * n_bootstrap) - 1)
+    hi_idx = min(n_bootstrap - 1, int((1 - alpha / 2.0) * n_bootstrap) - 1)
+    return means[lo_idx], means[hi_idx]
 
 
 def _simulate_one(
@@ -208,21 +234,21 @@ def _simulate_one(
             board = nb
             score += delta
             if not no_random:
-                board = _place_random_tile(board, rng)
+                board = place_random_tile(board, rng)
         elif kind == "swap":
             _, r1, c1, r2, c2 = action
             board = apply_swap(board, r1, c1, r2, c2)
             powers = dict(powers)
             powers["swap"] = max(0, powers.get("swap", 0) - 1)
             if not no_random:
-                board = _place_random_tile(board, rng)
+                board = place_random_tile(board, rng)
         elif kind == "delete":
             _, value, _, _ = action
             board = apply_delete(board, value)
             powers = dict(powers)
             powers["delete"] = max(0, powers.get("delete", 0) - 1)
             if not no_random:
-                board = _place_random_tile(board, rng)
+                board = place_random_tile(board, rng)
         else:
             break
 
@@ -244,13 +270,17 @@ def _simulate_one(
     }
 
 
-def _aggregate(runs: list[dict]) -> dict:
+def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> dict:
     n = len(runs)
     if n == 0:
         return {}
 
     total_moves = sum(r["moves"] for r in runs)
     total_actions = sum(r["actions"][k] for r in runs for k in ("move", "swap", "delete"))
+
+    score_ci = _bootstrap_mean_ci([r["score"] for r in runs], n_bootstrap=bootstrap_count)
+    max_ci = _bootstrap_mean_ci([r["max_tile"] for r in runs], n_bootstrap=bootstrap_count)
+    eval_ci = _bootstrap_mean_ci([r["final_eval"] for r in runs], n_bootstrap=bootstrap_count)
 
     return {
         "runs": n,
@@ -263,6 +293,9 @@ def _aggregate(runs: list[dict]) -> dict:
         "avg_moves": total_moves / n,
         "avg_eval": sum(r["final_eval"] for r in runs) / n,
         "avg_think_ms": (sum(r["think_ms_total"] for r in runs) / max(1, total_moves)),
+        "avg_score_ci95": [score_ci[0], score_ci[1]],
+        "avg_max_ci95": [max_ci[0], max_ci[1]],
+        "avg_eval_ci95": [eval_ci[0], eval_ci[1]],
         "move_pct": (sum(r["actions"]["move"] for r in runs) * 100.0 / max(1, total_actions)),
         "swap_pct": (sum(r["actions"]["swap"] for r in runs) * 100.0 / max(1, total_actions)),
         "delete_pct": (sum(r["actions"]["delete"] for r in runs) * 100.0 / max(1, total_actions)),
@@ -276,27 +309,64 @@ def evaluate_suite(
     n_seeds: int,
     seed_start: int,
     no_random: bool,
-) -> tuple[list[dict], dict[int, dict[str, dict]]]:
+    progress_every: int = 5,
+    bootstrap_count: int = DEFAULT_BOOTSTRAPS,
+    jsonl_out: str | None = None,
+) -> tuple[list[dict], dict[int, dict[str, dict]], dict[int, dict[str, list[dict]]]]:
     summary_rows: list[dict] = []
     per_fixture_depth: dict[int, dict[str, dict]] = {}
+    per_fixture_runs: dict[int, dict[str, list[dict]]] = {}
 
-    for depth in depths:
+    jsonl_path = Path(jsonl_out) if jsonl_out else None
+    if jsonl_path:
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        jsonl_path.write_text("")
+
+    total_start = time.perf_counter()
+    for depth_idx, depth in enumerate(depths, start=1):
+        print(f"[status] depth {depth} ({depth_idx}/{len(depths)}) starting...")
+        depth_start = time.perf_counter()
         per_fixture_depth[depth] = {}
+        per_fixture_runs[depth] = {}
         all_runs: list[dict] = []
 
-        for fx in fixtures:
+        for fx_idx, fx in enumerate(fixtures, start=1):
+            print(f"[status]   fixture {fx.name} ({fx_idx}/{len(fixtures)})")
             runs: list[dict] = []
             for i in range(n_seeds):
                 seed = seed_start + i
-                runs.append(_simulate_one(fx, depth, n_moves, seed, no_random))
-            fx_agg = _aggregate(runs)
+                run = _simulate_one(fx, depth, n_moves, seed, no_random)
+                runs.append(run)
+                if jsonl_path:
+                    row = {
+                        "depth": depth,
+                        "fixture": fx.name,
+                        "seed": seed,
+                        **run,
+                    }
+                    with jsonl_path.open("a") as f:
+                        f.write(json.dumps(row) + "\n")
+                if (i + 1) % progress_every == 0 or (i + 1) == n_seeds:
+                    print(
+                        f"[status]     seeds {i + 1}/{n_seeds} "
+                        f"(latest score={run['score']}, max_tile={run['max_tile']})"
+                    )
+            fx_agg = _aggregate(runs, bootstrap_count=bootstrap_count)
             per_fixture_depth[depth][fx.name] = fx_agg
+            per_fixture_runs[depth][fx.name] = runs
             all_runs.extend(runs)
 
-        row = {"depth": depth, **_aggregate(all_runs)}
+        row = {"depth": depth, **_aggregate(all_runs, bootstrap_count=bootstrap_count)}
         summary_rows.append(row)
+        elapsed = time.perf_counter() - depth_start
+        print(
+            f"[status] depth {depth} complete in {elapsed:.1f}s "
+            f"(avg_score={row['avg_score']:.1f}, avg_think_ms={row['avg_think_ms']:.2f})"
+        )
 
-    return summary_rows, per_fixture_depth
+    total_elapsed = time.perf_counter() - total_start
+    print(f"[status] evaluation complete in {total_elapsed:.1f}s")
+    return summary_rows, per_fixture_depth, per_fixture_runs
 
 
 def _print_metric_glossary() -> None:
@@ -315,15 +385,19 @@ def _print_metric_glossary() -> None:
 def _print_summary_table(rows: list[dict], title: str) -> None:
     print(title)
     print(
-        "| depth | avg_score | avg_max | survive% | reach2048% | "
-        "reach4096% | reach8192% | avg_moves | avg_eval | avg_think_ms |"
+        "| depth | avg_score | score_ci95 | avg_max | max_ci95 | survive% | reach2048% | "
+        "reach4096% | reach8192% | avg_moves | avg_eval | eval_ci95 | avg_think_ms |"
     )
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---|---:|")
     for r in rows:
+        score_ci = f"[{r['avg_score_ci95'][0]:.1f}, {r['avg_score_ci95'][1]:.1f}]"
+        max_ci = f"[{r['avg_max_ci95'][0]:.1f}, {r['avg_max_ci95'][1]:.1f}]"
+        eval_ci = f"[{r['avg_eval_ci95'][0]:.1f}, {r['avg_eval_ci95'][1]:.1f}]"
         print(
-            f"| {r['depth']} | {r['avg_score']:.1f} | {r['avg_max']:.1f} | {r['survive_pct']:.1f} | "
-            f"{r['reach2048_pct']:.1f} | {r['reach4096_pct']:.1f} | {r['reach8192_pct']:.1f} | "
-            f"{r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {r['avg_think_ms']:.2f} |"
+            f"| {r['depth']} | {r['avg_score']:.1f} | {score_ci} | {r['avg_max']:.1f} | {max_ci} | "
+            f"{r['survive_pct']:.1f} | {r['reach2048_pct']:.1f} | {r['reach4096_pct']:.1f} | "
+            f"{r['reach8192_pct']:.1f} | {r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {eval_ci} | "
+            f"{r['avg_think_ms']:.2f} |"
         )
 
 
@@ -347,7 +421,7 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
 def run_depth_calibration_legacy(n_moves: int, n_seeds: int, depths: list[int]) -> None:
     """Compatibility entrypoint used by benchmark_depth.py."""
     fixtures = _load_fixture_suite("depth_calibration")
-    rows, per_fx = evaluate_suite(
+    rows, per_fx, _ = evaluate_suite(
         fixtures=fixtures,
         depths=depths,
         n_moves=n_moves,
@@ -397,12 +471,34 @@ def main() -> None:
     parser.add_argument("--no-random", action="store_true")
     parser.add_argument("--per-fixture", action="store_true", help="Print per-fixture metrics for each depth")
     parser.add_argument("--json-out", default=None, help="Optional path to write machine-readable JSON results")
+    parser.add_argument(
+        "--jsonl-out",
+        default=None,
+        help="Optional path to write one JSON object per run (JSONL)",
+    )
+    parser.add_argument("--progress-every", type=int, default=5, help="Print status every N seeds (default: 5)")
+    parser.add_argument("--bootstraps", type=int, default=DEFAULT_BOOTSTRAPS, help="Bootstrap samples for CI (default: 400)")
+    parser.add_argument(
+        "--ab-depths",
+        default=None,
+        help="Optional A/B compare mode as 'baseline,candidate' depths (paired by fixture+seed)",
+    )
+    parser.add_argument(
+        "--ab-metric",
+        choices=["score", "max_tile", "final_eval"],
+        default="score",
+        help="Metric for A/B paired delta (default: score)",
+    )
     args = parser.parse_args()
 
     if args.moves <= 0:
         parser.error("--moves must be > 0")
     if args.seeds <= 0:
         parser.error("--seeds must be > 0")
+    if args.progress_every <= 0:
+        parser.error("--progress-every must be > 0")
+    if args.bootstraps <= 0:
+        parser.error("--bootstraps must be > 0")
 
     try:
         depths = _parse_depths(args.depths)
@@ -419,13 +515,21 @@ def main() -> None:
     _print_metric_glossary()
     print()
 
-    rows, per_fx = evaluate_suite(
+    print(
+        f"[status] starting evaluator: suite={args.suite} fixtures={len(fixtures)} "
+        f"depths={depths} moves={args.moves} seeds={args.seeds} seed_start={args.seed_start}"
+    )
+
+    rows, per_fx, per_runs = evaluate_suite(
         fixtures=fixtures,
         depths=depths,
         n_moves=args.moves,
         n_seeds=args.seeds,
         seed_start=args.seed_start,
         no_random=args.no_random,
+        progress_every=args.progress_every,
+        bootstrap_count=args.bootstraps,
+        jsonl_out=args.jsonl_out,
     )
 
     _print_summary_table(rows, title=f"Evaluation Summary (suite={args.suite}, fixtures={len(fixtures)})")
@@ -434,8 +538,62 @@ def main() -> None:
         for d in depths:
             _print_per_fixture(depth=d, stats=per_fx[d])
 
+    ab_result = None
+    if args.ab_depths:
+        try:
+            ab_depths = _parse_depths(args.ab_depths)
+        except ValueError:
+            parser.error("--ab-depths must contain exactly two depths like '3,4'")
+        if len(ab_depths) != 2:
+            parser.error("--ab-depths must contain exactly two depths like '3,4'")
+        d_base, d_cand = ab_depths
+        if d_base not in per_runs or d_cand not in per_runs:
+            parser.error("--ab-depths must be included in --depths")
+
+        paired_deltas: list[float] = []
+        metric_key = args.ab_metric
+        for fx in fixtures:
+            base_runs = per_runs[d_base][fx.name]
+            cand_runs = per_runs[d_cand][fx.name]
+            for i in range(min(len(base_runs), len(cand_runs))):
+                paired_deltas.append(cand_runs[i][metric_key] - base_runs[i][metric_key])
+
+        mean_delta = sum(paired_deltas) / len(paired_deltas) if paired_deltas else 0.0
+        ci_lo, ci_hi = _bootstrap_mean_ci(
+            paired_deltas,
+            n_bootstrap=args.bootstraps,
+            seed=args.seed_start + 17,
+        )
+        win_rate = sum(1 for x in paired_deltas if x > 0) * 100.0 / max(1, len(paired_deltas))
+        loss_rate = sum(1 for x in paired_deltas if x < 0) * 100.0 / max(1, len(paired_deltas))
+
+        ab_result = {
+            "baseline_depth": d_base,
+            "candidate_depth": d_cand,
+            "metric": metric_key,
+            "paired_samples": len(paired_deltas),
+            "mean_delta": mean_delta,
+            "mean_delta_ci95": [ci_lo, ci_hi],
+            "win_rate_pct": win_rate,
+            "loss_rate_pct": loss_rate,
+        }
+        print("\nA/B Paired Comparison")
+        print(
+            f"  baseline={d_base} candidate={d_cand} metric={metric_key} "
+            f"samples={ab_result['paired_samples']}"
+        )
+        print(
+            f"  mean_delta={mean_delta:+.2f} "
+            f"ci95=[{ci_lo:+.2f}, {ci_hi:+.2f}] "
+            f"win%={win_rate:.1f} loss%={loss_rate:.1f}"
+        )
+
     if args.json_out:
         payload = {
+            "meta": {
+                "git_sha": _git_sha(),
+                "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            },
             "config": {
                 "suite": args.suite,
                 "boards": sorted(selected_names) if selected_names else "all",
@@ -444,9 +602,15 @@ def main() -> None:
                 "seeds": args.seeds,
                 "seed_start": args.seed_start,
                 "no_random": args.no_random,
+                "bootstraps": args.bootstraps,
+                "progress_every": args.progress_every,
+                "ab_depths": args.ab_depths,
+                "ab_metric": args.ab_metric,
             },
             "summary": rows,
             "per_fixture": per_fx,
+            "ab_result": ab_result,
+            "jsonl_out": args.jsonl_out,
         }
         Path(args.json_out).write_text(json.dumps(payload, indent=2))
         print(f"\nWrote JSON results: {args.json_out}")

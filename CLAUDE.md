@@ -62,6 +62,12 @@ python3 -m unittest tests/test_strategy_actions.py
 python3 -m unittest tests/test_strategy_eval.py tests/test_transposition_cache.py
 python3 -m unittest tests/test_auto_depth_policy.py
 
+# Canonical evaluator (shared metrics + A/B + CIs + progress logs)
+python3 tests/evaluator.py --suite fixtures --depths 3,4,5 --seeds 30 --moves 80
+python3 tests/evaluator.py --suite fixtures --boards late_game,jammed --depths 4 --per-fixture
+python3 tests/evaluator.py --suite fixtures --depths 3,4 --ab-depths 3,4 --ab-metric score
+python3 tests/evaluator.py --suite fixtures --depths 3,4 --json-out /tmp/eval_summary.json --jsonl-out /tmp/eval_runs.jsonl
+
 # Lint (mirrors CI)
 ruff check .
 ```
@@ -157,6 +163,18 @@ Use these definitions consistently when comparing strategy changes:
 
 - `sim_utils.py` currently owns `place_random_tile(...)`.
 - Both `tests/run.py` and `benchmark_depth.py` use this helper to keep spawn semantics aligned.
+
+## Evaluator Notes
+
+- `tests/evaluator.py` is the canonical offline harness for depth/heuristic experiments.
+- Core summary metrics: `avg_score`, `avg_max`, `survive%`, `reach2048%`, `reach4096%`, `reach8192%`, `avg_moves`.
+- Diagnostics: `avg_eval`, `avg_think_ms`, action mix (`move/swap/delete`).
+- CI bands: summary includes bootstrap 95% CIs for `avg_score`, `avg_max`, `avg_eval` (configured by `--bootstraps`).
+- Paired A/B mode: `--ab-depths baseline,candidate --ab-metric score|max_tile|final_eval` compares identical fixture+seed samples.
+- Long-run visibility: status logs print depth/fixture/seed progress (`--progress-every`).
+- Structured output:
+  - `--json-out`: aggregate summary/per-fixture payload (includes git SHA and timestamp).
+  - `--jsonl-out`: one row per run (depth + fixture + seed + run metrics).
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
 - Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.
