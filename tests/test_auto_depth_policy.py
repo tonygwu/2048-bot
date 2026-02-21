@@ -20,8 +20,8 @@ class TestAutoDepthPolicy(unittest.TestCase):
     def test_fixture_depth_regression(self) -> None:
         expected = {
             "early_game": 2,
-            "mid_game": 3,
-            "swap_test": 3,
+            "mid_game": 4,
+            "swap_test": 4,
             "corner_trap": 4,
             "messy_lowmax": 4,
             "high_tile_sparse": 4,

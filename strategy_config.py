@@ -8,7 +8,8 @@ class DepthPolicy:
     min_depth: int = 2
     max_depth: int = 6
     soft_max: int = 5
-    base: float = 0.55
+    # Slightly higher baseline to favor deeper search in open/mid-game.
+    base: float = 0.67
     w_max: float = 0.18
     w_full: float = 1.10
     w_blocked: float = 0.75
@@ -17,7 +18,8 @@ class DepthPolicy:
     open_empties_threshold: int = 8
     open_penalty: float = 0.90
     jammed_empties_threshold: int = 2
-    jammed_bonus: float = 0.35
+    # Offset baseline bump for jammed boards so late-game depth doesn't jump.
+    jammed_bonus: float = 0.23
     low_valid_bonus_threshold: int = 2
     low_valid_bonus: float = 0.25
     # In open/mid-game boards, low legal-move count is often temporary noise.
