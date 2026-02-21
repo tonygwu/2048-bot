@@ -74,7 +74,7 @@ python3 tests/run.py late_game --no-random    # skip tile placement (pure decisi
 
 ## Architecture
 
-Three files, no external game logic libraries:
+Core runtime is centered on three files (plus cache/test tooling), with no external game logic libraries:
 
 **`game.py`** — Playwright async interface to https://play2048.co/
 
@@ -95,7 +95,7 @@ Three files, no external game logic libraries:
 
 **`bot.py`** — Async game loop
 
-- `auto_depth(max_tile)` maps tile thresholds to search depths (2→5, then 6 at ≥4096), increasing depth as the board gets more complex and less branchy.
+- `auto_depth(max_tile)` maps tile thresholds to search depths: `<512→2`, `<2048→3`, `<4096→4`, `<8192→5`, `≥8192→6`, increasing depth as the board gets more complex and less branchy.
 - `play_one_game()` handles the full lifecycle: win overlay dismissal (guard flag so DOM element persisting hidden doesn't re-trigger), stuck-board detection (5 unchanged consecutive moves), and power-up tracking.
 - Prints board and status every 25 moves; announces depth bumps in auto mode.
 
