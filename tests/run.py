@@ -30,28 +30,13 @@ from strategy import (
     apply_delete,
     apply_move,
     apply_swap,
+    auto_depth,
     best_action,
     empty_cells,
     is_game_over,
     score_board,
     _expectimax,
 )
-# Inline the depth schedule from bot.py so we don't transitively import playwright.
-# Keep in sync with _DEPTH_SCHEDULE / _DEPTH_MAX in bot.py.
-_DEPTH_SCHEDULE = [
-    ( 512, 2),   # max_tile <  512 → depth 2
-    (2048, 3),   # max_tile < 2048 → depth 3
-    (4096, 4),   # max_tile < 4096 → depth 4
-    (8192, 5),   # max_tile < 8192 → depth 5
-]
-_DEPTH_MAX = 6   # max_tile >= 8192
-
-
-def auto_depth(max_tile: int) -> int:
-    for threshold, depth in _DEPTH_SCHEDULE:
-        if max_tile < threshold:
-            return depth
-    return _DEPTH_MAX
 
 
 # ── Lightweight board display (no playwright dependency) ──────────────────────
@@ -193,7 +178,7 @@ def run(
     print(f"{'═'*54}")
 
     max_tile = max(v for row in board for v in row)
-    depth    = fixed_depth if fixed_depth is not None else auto_depth(max_tile)
+    depth    = fixed_depth if fixed_depth is not None else auto_depth(board)
 
     print(f"\nInitial state  (score={score}, max={max_tile}, depth={depth})")
     print_board(board, score=score, powers=powers)
@@ -205,7 +190,7 @@ def run(
 
     for move_num in range(1, num_moves + 1):
         max_tile = max(v for row in board for v in row)
-        depth    = fixed_depth if fixed_depth is not None else auto_depth(max_tile)
+        depth    = fixed_depth if fixed_depth is not None else auto_depth(board)
 
         print(f"\n── Move {move_num}  (depth={depth}, max_tile={max_tile}) {'─'*30}")
 
@@ -295,7 +280,7 @@ examples:
     )
     parser.add_argument(
         "--depth", "-d", type=str, default="auto",
-        help="Search depth: integer or 'auto' to follow the same schedule as the live bot (default: auto)",
+        help="Search depth: integer or 'auto' to follow live board-state adaptive depth (default: auto)",
     )
     parser.add_argument(
         "--seed", "-s", type=int, default=None,

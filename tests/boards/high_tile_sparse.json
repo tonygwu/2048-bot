@@ -1,0 +1,12 @@
+{
+  "name": "high_tile_sparse",
+  "description": "Very high max tile (8192) but open grid. Tests avoiding over-deep search on easy/sparse boards.",
+  "board": [
+    [8192, 1024, 256,   0],
+    [ 128,   64,  16,   0],
+    [   8,    4,   0,   0],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126000,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

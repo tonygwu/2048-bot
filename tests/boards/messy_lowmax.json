@@ -1,0 +1,12 @@
+{
+  "name": "messy_lowmax",
+  "description": "Low-ish max tile (256) but congested and rough. Tests raising depth for tactical recovery.",
+  "board": [
+    [256, 128,  64,  32],
+    [ 32,  16,   8,   4],
+    [ 16,   8,   4,   2],
+    [  2,   4,   0,   0]
+  ],
+  "score": 7600,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

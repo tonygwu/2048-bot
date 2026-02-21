@@ -16,7 +16,7 @@ pypy3.10 -m venv .venv
 ## Commands
 
 ```bash
-# Run the bot (auto depth, adaptive to max tile)
+# Run the bot (auto depth, adaptive to board state)
 .venv/bin/python bot.py
 
 # Common flag combinations
@@ -100,7 +100,7 @@ Core runtime is centered on three files (plus cache/test tooling), with no exter
 
 **`bot.py`** — Async game loop
 
-- `auto_depth(max_tile)` maps tile thresholds to search depths: `<512→2`, `<2048→3`, `<4096→4`, `<8192→5`, `≥8192→6`, increasing depth as the board gets more complex and less branchy.
+- `auto_depth(board)` chooses depth from board-state features (max tile, fullness, mobility, roughness), with depth-6 reserved for near-death late-game boards.
 - `play_one_game()` handles the full lifecycle: win overlay dismissal (guard flag so DOM element persisting hidden doesn't re-trigger), stuck-board detection (5 unchanged consecutive moves), and power-up tracking.
 - Prints board and status every 25 moves; announces depth bumps in auto mode.
 

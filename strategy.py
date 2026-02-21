@@ -141,6 +141,78 @@ def is_game_over(board: list[list[int]]) -> bool:
     return True
 
 
+# ── Adaptive search depth ──────────────────────────────────────────────────────
+# Depth is chosen from multiple board features (not max tile alone):
+# - max tile stage (late-game value concentration)
+# - fullness / empty-cell count (chance branching + tactical tightness)
+# - mobility (how many legal directions remain)
+# - roughness (local value discontinuity; higher = messier board)
+_DEPTH_MIN = 2
+_DEPTH_MAX = 6
+_D_SOFT_MAX = 5
+_D_BASE = 0.55
+_D_W_MAX = 0.18
+_D_W_FULL = 1.10
+_D_W_BLOCKED = 0.75
+_D_W_ROUGH = 0.45
+
+
+def auto_depth(board: list[list[int]]) -> int:
+    """Return adaptive expectimax depth from board-state features."""
+    empties = 0
+    max_tile = 0
+    for r in range(4):
+        for c in range(4):
+            v = board[r][c]
+            if v == 0:
+                empties += 1
+            elif v > max_tile:
+                max_tile = v
+
+    max_log = math.log2(max_tile) if max_tile > 0 else 0.0
+    fullness = (16 - empties) / 16.0
+
+    valid = 0
+    for d in DIRECTIONS:
+        _, _, changed = apply_move(board, d)
+        if changed:
+            valid += 1
+    blocked = (4 - valid) / 3.0
+
+    rough_n = min(1.0, _roughness(board) / 36.0)
+
+    score = (
+        _D_BASE
+        + _D_W_MAX * max_log
+        + _D_W_FULL * fullness
+        + _D_W_BLOCKED * blocked
+        + _D_W_ROUGH * rough_n
+    )
+
+    # Open boards: reduce depth because future is less constrained.
+    if empties >= 8:
+        score -= 0.90
+    # Jammed boards: raise depth to look further for escapes.
+    elif empties <= 2:
+        score += 0.35
+    if valid <= 2:
+        score += 0.25
+
+    # Extra tactical bump for low-empty, high-roughness boards that often
+    # require "surgery" despite modest max-tile values.
+    if empties <= 3 and valid <= 3 and rough_n >= 0.9:
+        score += 0.40
+
+    depth = max(_DEPTH_MIN, min(_D_SOFT_MAX, int(round(score))))
+
+    # Near-death board: allow depth 6 only when the board is both extremely
+    # constrained and rough with a late-game max tile.
+    if empties <= 1 and valid <= 2 and rough_n >= 0.95 and max_log >= 11.0:
+        return _DEPTH_MAX
+
+    return depth
+
+
 # ── Heuristic evaluation ───────────────────────────────────────────────────────
 #
 # Eval: V(s,p) = w_E·E + w_G·G(s) + w_mono·Mono(s) − w_rough·Rough(s)

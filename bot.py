@@ -20,6 +20,7 @@ from game import (
 )
 from strategy import (
     best_action,
+    auto_depth,
     SCORE_BOARD_VERSION,
     load_trans_table,
     drain_new_entries,
@@ -29,25 +30,6 @@ from strategy import (
 import cache as db
 
 TARGET_TILE = 16384   # stop once this tile is reached
-
-
-# ── Adaptive depth schedule ────────────────────────────────────────────────────
-# Depth increases as the max tile grows. Late-game decisions are more critical,
-# and the board has fewer empty cells so chance-node branching is cheaper.
-_DEPTH_SCHEDULE = [
-    ( 512, 2),   # max_tile <  512 → depth 2
-    (2048, 3),   # max_tile < 2048 → depth 3
-    (4096, 4),   # max_tile < 4096 → depth 4
-    (8192, 5),   # max_tile < 8192 → depth 5
-]
-_DEPTH_MAX = 6   # max_tile >= 8192
-
-
-def auto_depth(max_tile: int) -> int:
-    for threshold, depth in _DEPTH_SCHEDULE:
-        if max_tile < threshold:
-            return depth
-    return _DEPTH_MAX
 
 
 async def play_one_game(page, depth_arg, game_num: int) -> dict:
@@ -150,7 +132,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
             continue
 
         # ── Compute depth for this move ───────────────────────────────────────
-        depth = auto_depth(max_tile) if auto else depth_arg
+        depth = auto_depth(state.board) if auto else depth_arg
 
         # Announce depth changes (auto mode)
         if auto and depth != last_depth:
@@ -310,7 +292,7 @@ def main():
     parser = argparse.ArgumentParser(description="2048 bot using Expectimax AI")
     parser.add_argument("--headless", action="store_true", help="Run without visible browser")
     parser.add_argument("--depth", default="auto",
-                        help="Expectimax search depth: integer for fixed, 'auto' to scale with max tile (default: auto)")
+                        help="Expectimax search depth: integer for fixed, 'auto' for board-state adaptive depth (default: auto)")
     parser.add_argument("--games", type=int, default=1, help="Number of games to play (default 1)")
     args = parser.parse_args()
 
