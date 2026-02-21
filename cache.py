@@ -16,8 +16,37 @@ import os
 import sqlite3
 
 _DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "cache", "transposition.db")
+_SHARED_DB_PATH = os.path.expanduser("~/Code/transposition.db")
 _ENV_DB_PATH = os.environ.get("TRANS_DB_PATH")
-DB_PATH = os.path.abspath(os.path.expanduser(_ENV_DB_PATH)) if _ENV_DB_PATH else _DEFAULT_DB_PATH
+
+
+def _ensure_default_symlink_to_shared(default_path: str, shared_path: str) -> str:
+    """Best-effort bootstrap for fresh clones:
+    create cache/transposition.db -> ~/Code/transposition.db when absent.
+    """
+    db_dir = os.path.dirname(default_path)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    # Keep existing files/symlinks unchanged.
+    if os.path.lexists(default_path):
+        return default_path
+
+    try:
+        os.symlink(shared_path, default_path)
+    except OSError:
+        # If symlink creation is unavailable, fallback to the local path.
+        pass
+    return default_path
+
+
+def _resolve_db_path() -> str:
+    if _ENV_DB_PATH:
+        return os.path.abspath(os.path.expanduser(_ENV_DB_PATH))
+    return _ensure_default_symlink_to_shared(_DEFAULT_DB_PATH, _SHARED_DB_PATH)
+
+
+DB_PATH = _resolve_db_path()
 
 _SQLITE_TIMEOUT_S = 30.0
 _SQLITE_BUSY_TIMEOUT_MS = 30_000

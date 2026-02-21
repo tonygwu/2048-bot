@@ -193,7 +193,7 @@ Use these definitions consistently when comparing strategy changes:
 - `board_bb` is stored as signed int64 (`_to_signed`/`_from_signed` helpers handle values > 2^63).
 - `load_version(version)` → dict loaded into `_TRANS_TABLE` at bot startup.
 - `save_entries(entries, version)` writes new rows after each game.
-- DB path can be overridden with `TRANS_DB_PATH` (default is `cache/transposition.db` in this repo).
+- DB path can be overridden with `TRANS_DB_PATH`. If unset, fresh clones auto-bootstrap `cache/transposition.db` as a symlink to `~/Code/transposition.db` when possible.
 
 **Versioning** — **CRITICAL**:
 - `SCORE_BOARD_VERSION` in `strategy.py` must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
