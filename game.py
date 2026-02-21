@@ -187,6 +187,28 @@ def _parse_powerups(data: dict) -> dict:
         return zero
 
 
+def _parse_update_flags(data: dict) -> tuple[bool | None, bool | None]:
+    """Extract (over, won) flags from a worker 'update' payload.
+    Returns (None, None) when unavailable.
+    """
+    try:
+        args = data.get("args", [])
+        if not args or not isinstance(args[0], dict):
+            return None, None
+        state = str(args[0].get("state", "")).strip().lower()
+        if not state:
+            return None, None
+        over = state in {"game_over", "gameover", "over", "ended", "dead", "lost"}
+        won = state in {"won", "win", "victory"}
+        # Some implementations keep state="playing" even after the 2048 milestone;
+        # in that case worker state alone does not signal win/over.
+        if state == "playing":
+            return None, None
+        return over, won
+    except Exception:
+        return None, None
+
+
 async def read_board_from_worker(page: Page) -> list[list[int]] | None:
     """Read the board from the most recent 'update' worker message."""
     msgs = await page.evaluate("() => window._workerMsgs || []")
@@ -261,12 +283,25 @@ async def read_state(page: Page) -> GameState:
           const scoreText = spans[0] ? (spans[0].textContent || '') : '';
           const bestText = spans[1] ? (spans[1].textContent || '') : '';
           const bodyText = document.body ? (document.body.innerText || '') : '';
+          const hasKeepGoingButtonVisible = Array.from(document.querySelectorAll('button'))
+            .some((b) => {
+              const text = (b.textContent || '').trim();
+              if (!/keep\\s*going/i.test(text)) return false;
+              const style = window.getComputedStyle(b);
+              return (
+                b.getClientRects().length > 0 &&
+                style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                style.opacity !== '0'
+              );
+            });
           return {
             update,
             scoreText,
             bestText,
             over: bodyText.includes('Game over'),
             won: bodyText.includes('You win'),
+            hasKeepGoingButtonVisible,
           };
         }
         """
@@ -280,12 +315,18 @@ async def read_state(page: Page) -> GameState:
 
     score = _safe_int(snap.get("scoreText", ""))
     best = _safe_int(snap.get("bestText", ""))
-    board = _parse_update_board(snap.get("update"))
-    powers: dict = _parse_powerups(snap.get("update") or {})
+    update = snap.get("update") or {}
+    board = _parse_update_board(update)
+    powers: dict = _parse_powerups(update)
     if board is None:
         board = await read_board_from_screenshot(page) or [[0]*4 for _ in range(4)]
-    over = bool(snap.get("over"))
-    won = bool(snap.get("won"))
+    over_from_update, won_from_update = _parse_update_flags(update)
+    over = over_from_update if over_from_update is not None else bool(snap.get("over"))
+    # "You win" text can persist hidden in DOM after dismissal. Treat the win
+    # overlay as active only when a visible "Keep going" button exists.
+    won = bool(snap.get("hasKeepGoingButtonVisible"))
+    if won_from_update is not None and won and not won_from_update:
+        won = False
     return GameState(board=board, score=score, best=best, over=over, won=won, powers=powers)
 
 
@@ -415,15 +456,31 @@ async def execute_delete(page: Page, row: int, col: int) -> None:
 
 async def dismiss_win_overlay(page: Page) -> None:
     """Dismiss the 'You win!' overlay so the game can continue past 2048."""
-    for txt in ["Keep going!", "Keep going", "Keep Going!", "Keep Going", "Continue"]:
-        btn = page.locator(f"text={txt}")
-        if await btn.count() > 0:
+    button_candidates = [
+        page.get_by_role("button", name="Keep going!"),
+        page.get_by_role("button", name="Keep going"),
+        page.get_by_role("button", name="Keep Going!"),
+        page.get_by_role("button", name="Keep Going"),
+        page.get_by_role("button", name="Continue"),
+        page.locator("button", has_text="Keep"),
+    ]
+    for locator in button_candidates:
+        count = await locator.count()
+        for i in range(count):
+            candidate = locator.nth(i)
             try:
-                await btn.first.click(timeout=3000)
+                if not await candidate.is_visible():
+                    continue
+                await candidate.click(timeout=3000)
                 await asyncio.sleep(0.3)
                 return
             except Exception:
-                pass
+                try:
+                    await candidate.click(force=True, timeout=1500)
+                    await asyncio.sleep(0.3)
+                    return
+                except Exception:
+                    pass
     await page.keyboard.press("Escape")
     await asyncio.sleep(0.3)
 

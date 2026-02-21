@@ -54,6 +54,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
     best_score_seen = 0
     powers_used = {"undo": 0, "swap": 0, "delete": 0}
     win_overlay_dismissed = False  # only dismiss once; DOM element persists hidden after dismissal
+    win_overlay_retry_count = 0
 
     async def try_undo_recovery(state, reason: str) -> bool:
         """Attempt to recover from terminal position by spending one Undo."""
@@ -135,7 +136,17 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
         if state.won and not win_overlay_dismissed:
             print(f"\n[Move {move_count}]  *** {max_tile} tile — dismissing win overlay ***")
             await dismiss_win_overlay(page)
-            win_overlay_dismissed = True
+            await asyncio.sleep(0.15)
+            state_after_dismiss = await read_state(page)
+            if state_after_dismiss.won:
+                win_overlay_retry_count += 1
+                print(f"[Move {move_count}]  Win overlay still present; will retry dismissal.")
+                if win_overlay_retry_count >= 8:
+                    print(f"[Move {move_count}]  Win overlay retry cap reached; continuing anyway.")
+                    win_overlay_dismissed = True
+            else:
+                win_overlay_dismissed = True
+                win_overlay_retry_count = 0
             continue
 
         # ── Compute depth for this move ───────────────────────────────────────
