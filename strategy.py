@@ -96,10 +96,13 @@ def is_game_over(board: list[list[int]]) -> bool:
 
 # ── Heuristic evaluation ───────────────────────────────────────────────────────
 #
-# Eval: V(s) = w_E·E + w_G·G(s) + w_mono·Mono(s) − w_rough·Rough(s)
-#            + w_merge·MergePot(s) + w_max·M + w_score·ΣTile
+# Eval: V(s,p) = w_E·E + w_G·G(s) + w_mono·Mono(s) − w_rough·Rough(s)
+#             + w_merge·MergePot(s) + w_max·M + w_score·ΣTile
+#             + PowerupValue(s, p)
 #
 # All tile quantities are in log-space: L(x) = log2(x), L(0) = 0.
+# p = powers dict {"swap": N, "delete": N}; incorporated so the tree
+# naturally prices the cost of spending a power-up.
 
 # Snake-pattern gradient weights — upper-left (0,0) is home corner.
 # G(s) = Σ _SNAKE[r][c] × L(tile[r][c])
@@ -117,6 +120,25 @@ _W_ROUGH =  35.0   # roughness penalty (subtracted)
 _W_MERGE =  65.0   # near-term merge potential
 _W_MAX   = 120.0   # explicit max-tile push (log2 of max tile)
 _W_SCORE =   1.0   # score proxy (sum of tile values; keep small)
+
+# ── Power-up valuation ─────────────────────────────────────────────────────────
+#
+# Each power-up use is worth _W_PU_BASE × log2(max_tile) heuristic units,
+# so value scales with game stage (later = scarcer board, higher rescue value).
+#
+# "Effective uses" = actual_uses + proximity_bonus, where proximity_bonus ∈ [0, 1)
+# represents how close the board is to earning the next use from the game
+# (swap unlocks at 256, delete at 512).  The bonus is zeroed out when uses
+# are already at the cap, which creates a natural incentive to spend a power-up
+# right before earning a replacement — you go from (cap, near-cap-ignored) to
+# (cap-1, near-cap-counts ≈ 0.9) and the board improvement only needs to cover
+# the small residual gap.
+_W_PU_BASE        = 100.0   # heuristic units per effective use, per log2(max_tile)
+_PU_DELETE_SCALE  =   1.2   # delete is slightly more valuable than swap
+_MAX_SWAP_USES    =   2     # game caps storable swap uses at 2
+_MAX_DELETE_USES  =   2     # game caps storable delete uses at 2
+_SWAP_UNLOCK_TILE =  256    # creating a 256 tile earns a swap use
+_DELETE_UNLOCK_TILE = 512   # creating a 512 tile earns a delete use
 
 
 def _gradient(board: list[list[int]]) -> float:
@@ -212,8 +234,60 @@ def _merge_potential(board: list[list[int]]) -> float:
     return s
 
 
-def score_board(board: list[list[int]]) -> float:
-    """Static evaluation of a board position (higher = better for the player)."""
+def _proximity_to_unlock(max_tile: int, unlock_tile: int) -> float:
+    """Fraction of the way to the next power-up unlock, in log2-space.
+
+    Returns a value in [0, 0.95).  Capped below 1 so it never fully equals
+    an earned use — only the actual powers dict can do that.
+
+    Examples (swap unlock = 256):
+      max_tile=128 → log2(128)/log2(256) = 7/8 = 0.875
+      max_tile= 64 → 6/8 = 0.75
+      max_tile=256 → capped at 0.95  (you've reached/passed the threshold)
+    """
+    if max_tile <= 0:
+        return 0.0
+    return min(0.95, math.log2(max_tile) / math.log2(unlock_tile))
+
+
+def _powerup_value(max_tile: int, powers: dict) -> float:
+    """Heuristic value of the current power-up inventory.
+
+    effective_swaps   = min(actual_swaps,   MAX) + proximity_swap   (if below cap)
+    effective_deletes = min(actual_deletes, MAX) + proximity_delete (if below cap)
+
+    Value per effective use scales with log2(max_tile) so power-ups are
+    worth more later in the game.
+    """
+    if not powers or max_tile <= 0:
+        return 0.0
+
+    stage = math.log2(max_tile)   # ≈ 1 early, ≈ 14 very late
+
+    swap_uses   = min(powers.get("swap",   0), _MAX_SWAP_USES)
+    delete_uses = min(powers.get("delete", 0), _MAX_DELETE_USES)
+
+    prox_swap   = _proximity_to_unlock(max_tile, _SWAP_UNLOCK_TILE)   if swap_uses   < _MAX_SWAP_USES   else 0.0
+    prox_delete = _proximity_to_unlock(max_tile, _DELETE_UNLOCK_TILE) if delete_uses < _MAX_DELETE_USES else 0.0
+
+    effective_swaps   = swap_uses   + prox_swap
+    effective_deletes = delete_uses + prox_delete
+
+    value_per_swap   = _W_PU_BASE * stage
+    value_per_delete = _W_PU_BASE * stage * _PU_DELETE_SCALE
+
+    return value_per_swap * effective_swaps + value_per_delete * effective_deletes
+
+
+def score_board(board: list[list[int]], powers: dict | None = None) -> float:
+    """Static evaluation of a board position (higher = better for the player).
+
+    powers (optional) is the current {"swap": N, "delete": N} inventory.
+    When supplied, the power-up value is folded into the score so the search
+    tree naturally prices spending a use.
+    """
+    if powers is None:
+        powers = {}
     empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
     max_val = max(board[r][c] for r in range(4) for c in range(4))
     tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
@@ -226,14 +300,18 @@ def score_board(board: list[list[int]]) -> float:
         + _W_MERGE * _merge_potential(board)
         + _W_MAX   * (math.log2(max_val) if max_val > 0 else 0.0)
         + _W_SCORE * tile_sum
+        + _powerup_value(max_val, powers)
     )
 
 
 # ── Expectimax ────────────────────────────────────────────────────────────────
 
-def _expectimax(board: list[list[int]], depth: int, is_max: bool) -> float:
+def _expectimax(board: list[list[int]], depth: int, is_max: bool,
+                powers: dict | None = None) -> float:
+    if powers is None:
+        powers = {}
     if depth == 0:
-        return score_board(board)
+        return score_board(board, powers)
 
     if is_max:
         best = float("-inf")
@@ -243,15 +321,15 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool) -> float:
             if not changed:
                 continue
             any_valid = True
-            val = _expectimax(nb, depth - 1, False)
+            val = _expectimax(nb, depth - 1, False, powers)
             if val > best:
                 best = val
-        return best if any_valid else score_board(board)
+        return best if any_valid else score_board(board, powers)
 
     else:  # chance node
         empties = empty_cells(board)
         if not empties:
-            return score_board(board)
+            return score_board(board, powers)
 
         # Cap the number of empty cells we branch on when the board is open.
         # Empirically, sampling 8 cells instead of 15 gives ~3× speedup with
@@ -262,9 +340,9 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool) -> float:
         total = 0.0
         for r, c in sample:
             board[r][c] = 2
-            total += 0.9 * _expectimax(board, depth - 1, True)
+            total += 0.9 * _expectimax(board, depth - 1, True, powers)
             board[r][c] = 4
-            total += 0.1 * _expectimax(board, depth - 1, True)
+            total += 0.1 * _expectimax(board, depth - 1, True, powers)
             board[r][c] = 0   # restore
 
         return total / len(sample)
@@ -293,12 +371,6 @@ def _top_positions(board: list[list[int]], k: int = 6) -> list[tuple[int, int]]:
     return [(r, c) for _, r, c in tiles[:k]]
 
 
-# Shadow costs prevent power-ups from being used except when they give a
-# significantly better outcome than any regular move.
-_SWAP_COST   = 380.0
-_DELETE_COST = 420.0
-
-
 def best_action(
     board: list[list[int]],
     powers: dict | None = None,
@@ -311,9 +383,9 @@ def best_action(
       ("swap",   r1, c1, r2, c2)
       ("delete", value, row, col)   # (row,col) = position of one tile with that value
 
-    Power-ups are only considered when powers[key] > 0.  A shadow cost is
-    subtracted from each power-up's expectimax value so they are used only
-    when they provide a meaningful advantage over the best regular move.
+    Power-up cost is priced implicitly: when a power-up is used the search
+    tree receives a decremented powers dict, so score_board at every leaf
+    reflects one fewer use.  No explicit shadow cost needed.
 
     Returns None if no action is possible (game over).
     """
@@ -322,18 +394,19 @@ def best_action(
     best_val = float("-inf")
     best_act: tuple | None = None
 
-    # ── Regular moves ─────────────────────────────────────────────────────────
+    # ── Regular moves (powers unchanged through the tree) ─────────────────────
     for d in DIRECTIONS:
         nb, score_delta, changed = apply_move(board, d)
         if not changed:
             continue
-        val = _expectimax(nb, depth - 1, False) + score_delta
+        val = _expectimax(nb, depth - 1, False, powers) + score_delta
         if val > best_val:
             best_val = val
             best_act = ("move", d)
 
-    # ── Swap two tiles ─────────────────────────────────────────────────────────
+    # ── Swap two tiles (tree sees swap count decremented by 1) ────────────────
     if powers.get("swap", 0) > 0:
+        powers_after = {**powers, "swap": powers["swap"] - 1}
         top = _top_positions(board, k=6)
         for i in range(len(top)):
             for j in range(i + 1, len(top)):
@@ -342,13 +415,14 @@ def best_action(
                 if board[r1][c1] == board[r2][c2]:
                     continue   # swapping equal tiles does nothing useful
                 nb = apply_swap(board, r1, c1, r2, c2)
-                val = _expectimax(nb, depth - 1, False) - _SWAP_COST
+                val = _expectimax(nb, depth - 1, False, powers_after)
                 if val > best_val:
                     best_val = val
                     best_act = ("swap", r1, c1, r2, c2)
 
-    # ── Delete tiles by value ──────────────────────────────────────────────────
+    # ── Delete tiles by value (tree sees delete count decremented by 1) ───────
     if powers.get("delete", 0) > 0:
+        powers_after = {**powers, "delete": powers["delete"] - 1}
         empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
         # Prefer deleting small clutter; expand candidates when board is jammed
         candidates = [2, 4, 8]
@@ -359,10 +433,9 @@ def best_action(
             if v not in present:
                 continue
             nb = apply_delete(board, v)
-            val = _expectimax(nb, depth - 1, False) - _DELETE_COST
+            val = _expectimax(nb, depth - 1, False, powers_after)
             if val > best_val:
                 best_val = val
-                # Return position of any tile with that value (for browser clicking)
                 pos = next((r, c) for r in range(4) for c in range(4) if board[r][c] == v)
                 best_act = ("delete", v, pos[0], pos[1])
 
