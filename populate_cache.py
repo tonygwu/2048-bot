@@ -20,6 +20,9 @@ Usage examples
   # After bumping SCORE_BOARD_VERSION, refresh the cache for all known boards:
   .venv/bin/python populate_cache.py --recompute
 
+  # Recompute a batch prioritizing smaller max-tile states first:
+  .venv/bin/python populate_cache.py --recompute --only-missing-current --limit 20000 --order-by-max-tile asc
+
   # Generate 500 board positions at depth 3 and cache them:
   .venv/bin/python populate_cache.py --generate 500
 
@@ -111,6 +114,7 @@ def cmd_recompute(
     only_missing_current: bool,
     limit: int | None,
     offset: int,
+    order_by_max_tile: str | None,
 ) -> None:
     """Recompute score_board for all states in the DB under SCORE_BOARD_VERSION."""
     if not target_version:
@@ -120,6 +124,7 @@ def cmd_recompute(
         only_missing_current=only_missing_current,
         limit=limit,
         offset=offset,
+        order_by_max_tile=order_by_max_tile,
     )
     if not tasks:
         print("DB is empty — nothing to recompute.")
@@ -133,10 +138,11 @@ def cmd_recompute(
 
     mode = "missing-current only" if only_missing_current else "all states"
     limit_str = "none" if limit is None else f"{limit:,}"
+    order_str = "key order" if order_by_max_tile is None else f"max-tile {order_by_max_tile}"
     print(
         f"Recomputing {total:,} unique states as version {target_version!r} "
         f"(mode={mode}, offset={offset:,}, limit={limit_str}, workers={workers}, "
-        f"write_chunk={write_chunk:,}, progress_every={progress_every:,})…"
+        f"write_chunk={write_chunk:,}, progress_every={progress_every:,}, order={order_str})…"
     )
 
     t0 = time.perf_counter()
@@ -283,6 +289,15 @@ def main() -> None:
                         help="Skip this many ordered unique states before recomputing")
     parser.add_argument("--target-version", type=str, default=SCORE_BOARD_VERSION,
                         help="Version label to write during --recompute (default: SCORE_BOARD_VERSION)")
+    parser.add_argument(
+        "--order-by-max-tile",
+        choices=["asc", "desc"],
+        default=None,
+        help=(
+            "In --recompute, order source states by max tile before offset/limit "
+            "(asc=lowest first, desc=highest first)."
+        ),
+    )
     args = parser.parse_args()
 
     if args.recompute:
@@ -294,6 +309,7 @@ def main() -> None:
             args.only_missing_current,
             args.limit,
             args.offset,
+            args.order_by_max_tile,
         )
     elif args.generate is not None:
         cmd_generate(args.generate, args.depth)

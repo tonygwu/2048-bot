@@ -82,6 +82,26 @@ def _from_signed(val: int) -> int:
     return val if val >= 0 else val + (1 << 64)
 
 
+def _max_exp_from_bb_unsigned(bb: int) -> int:
+    """Return max tile exponent across 16 nibbles in a packed bitboard."""
+    v = int(bb)
+    out = 0
+    for _ in range(16):
+        nib = v & 0xF
+        if nib > out:
+            out = nib
+        v >>= 4
+    return out
+
+
+def _bb_max_exp_from_signed_sql(val: int) -> int:
+    """SQLite UDF: signed int64 board_bb -> max tile exponent (0 for empty)."""
+    try:
+        return _max_exp_from_bb_unsigned(_from_signed(int(val)))
+    except Exception:
+        return 0
+
+
 # ── DB init ───────────────────────────────────────────────────────────────────
 
 def _set_common_pragmas(conn: sqlite3.Connection) -> None:
@@ -283,12 +303,14 @@ def get_recompute_states(
     only_missing_current: bool = False,
     limit: int | None = None,
     offset: int = 0,
+    order_by_max_tile: str | None = None,
 ) -> list[tuple[int, int, int]]:
     """Return unique (board_bb_unsigned, swap_uses, delete_uses) states for recompute.
 
     If only_missing_current=True, return only states that do not yet have a row in
-    current_version. Results are ordered deterministically by key and support
-    optional LIMIT/OFFSET for batch processing.
+    current_version. Results are ordered deterministically by key unless
+    order_by_max_tile is "asc"/"desc", in which case ordering is by max tile
+    exponent (low/high first), then key. Supports optional LIMIT/OFFSET.
     """
     if not os.path.exists(DB_PATH):
         return []
@@ -296,9 +318,14 @@ def get_recompute_states(
     init_db()
     lim = None if limit is None else max(0, int(limit))
     off = max(0, int(offset))
+    order_norm = None if order_by_max_tile is None else str(order_by_max_tile).strip().lower()
+    if order_norm not in {None, "asc", "desc"}:
+        raise ValueError(f"order_by_max_tile must be None/'asc'/'desc', got: {order_by_max_tile!r}")
     conn = _connect_ro()
     try:
         _set_common_pragmas(conn)
+        if order_norm is not None:
+            conn.create_function("bb_max_exp", 1, _bb_max_exp_from_signed_sql)
         if only_missing_current:
             sql = """
                 SELECT e.board_bb, e.swap_uses, e.delete_uses
@@ -312,17 +339,23 @@ def get_recompute_states(
                       AND cur.delete_uses = e.delete_uses
                 )
                 GROUP BY e.board_bb, e.swap_uses, e.delete_uses
-                ORDER BY e.board_bb, e.swap_uses, e.delete_uses
             """
             params: list = [current_version]
         else:
             sql = """
-                SELECT board_bb, swap_uses, delete_uses
-                FROM entries
-                GROUP BY board_bb, swap_uses, delete_uses
-                ORDER BY board_bb, swap_uses, delete_uses
+                SELECT e.board_bb, e.swap_uses, e.delete_uses
+                FROM entries e
+                GROUP BY e.board_bb, e.swap_uses, e.delete_uses
             """
             params = []
+
+        if order_norm is None:
+            sql += "\n ORDER BY e.board_bb, e.swap_uses, e.delete_uses"
+        else:
+            sql += (
+                f"\n ORDER BY bb_max_exp(e.board_bb) {order_norm.upper()}, "
+                "e.board_bb, e.swap_uses, e.delete_uses"
+            )
 
         if lim is not None:
             sql += " LIMIT ? OFFSET ?"
