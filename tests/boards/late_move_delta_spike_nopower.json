@@ -1,0 +1,12 @@
+{
+  "name": "late_move_delta_spike_nopower",
+  "description": "No-power late board where a high immediate merge score can produce a weaker board contour over subsequent random spawns.",
+  "board": [
+    [2048, 2048, 0, 0],
+    [2, 4, 8, 4],
+    [2, 4, 2, 0],
+    [0, 0, 0, 2]
+  ],
+  "score": 40648,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

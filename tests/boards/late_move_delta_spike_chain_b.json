@@ -1,0 +1,12 @@
+{
+  "name": "late_move_delta_spike_chain_b",
+  "description": "Late board extracted from evaluator traces where immediate merge gain can overshadow better medium-horizon structure and power-up timing.",
+  "board": [
+    [2048, 2048, 0, 0],
+    [4, 8, 16, 0],
+    [8, 0, 0, 2],
+    [2, 0, 0, 0]
+  ],
+  "score": 36172,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}

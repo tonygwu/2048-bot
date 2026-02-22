@@ -1,0 +1,12 @@
+{
+  "name": "late_delete_first_spawn_flip_move_to_delete",
+  "description": "Near-jammed late board where exact first-spawn expansion flips the best action from move to delete.",
+  "board": [
+    [2048, 1024, 128, 256],
+    [8, 0, 1024, 8],
+    [0, 256, 256, 8],
+    [0, 0, 2048, 64]
+  ],
+  "score": 46380,
+  "powers": {"undo": 0, "swap": 0, "delete": 2}
+}

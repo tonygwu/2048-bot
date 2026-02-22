@@ -1,0 +1,12 @@
+{
+  "name": "late_swap_open_sampling_trap_c",
+  "description": "Open near-terminal late board where swap can beat move under sampled chance nodes but harm short-horizon stability.",
+  "board": [
+    [4096, 8, 4, 2],
+    [64, 4, 2, 0],
+    [8, 0, 0, 0],
+    [0, 0, 0, 0]
+  ],
+  "score": 44968,
+  "powers": {"undo": 0, "swap": 1, "delete": 1}
+}

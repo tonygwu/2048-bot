@@ -1,0 +1,12 @@
+{
+  "name": "late_swap_open_sampling_trap_a",
+  "description": "Open late board where swap looked strong in expectimax but preceded a large near-term heuristic cliff.",
+  "board": [
+    [2048, 1024, 512, 16],
+    [512, 0, 0, 0],
+    [16, 2, 4, 0],
+    [4, 0, 0, 0]
+  ],
+  "score": 33108,
+  "powers": {"undo": 0, "swap": 1, "delete": 2}
+}

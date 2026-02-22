@@ -1,0 +1,12 @@
+{
+  "name": "late_swap_open_sampling_trap_d",
+  "description": "High-empty late board where swap choice competes with move/delete and can mis-rank under sampled chance expansion.",
+  "board": [
+    [4096, 16, 0, 0],
+    [16, 4, 2, 0],
+    [8, 0, 0, 0],
+    [0, 0, 2, 0]
+  ],
+  "score": 40288,
+  "powers": {"undo": 0, "swap": 1, "delete": 2}
+}

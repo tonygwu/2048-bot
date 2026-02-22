@@ -1,0 +1,12 @@
+{
+  "name": "late_delete_spawn_sampling_32s",
+  "description": "Near-full 4096 board where delete(32) creates many spawn sites; targets first-chance expansion accuracy for delete timing.",
+  "board": [
+    [4096, 2048, 1024, 512],
+    [256, 128, 64, 32],
+    [32, 32, 0, 0],
+    [32, 32, 0, 0]
+  ],
+  "score": 62300,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}

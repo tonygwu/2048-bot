@@ -1,0 +1,12 @@
+{
+  "name": "late_move_delta_spike_chain_a",
+  "description": "Trace-derived late board where a +4096 left merge is tempting but can disrupt follow-up shape while swap/delete are still banked.",
+  "board": [
+    [2048, 2048, 16, 0],
+    [16, 4, 0, 2],
+    [4, 4, 0, 0],
+    [0, 0, 0, 0]
+  ],
+  "score": 36184,
+  "powers": {"undo": 0, "swap": 1, "delete": 2}
+}

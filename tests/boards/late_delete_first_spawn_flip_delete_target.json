@@ -1,0 +1,12 @@
+{
+  "name": "late_delete_first_spawn_flip_delete_target",
+  "description": "Low-empty delete-rich board where exact first chance can change which value gets deleted (256 vs 8).",
+  "board": [
+    [4, 256, 1024, 0],
+    [2048, 8, 0, 2048],
+    [8, 8, 8, 0],
+    [8, 1024, 256, 8]
+  ],
+  "score": 45210,
+  "powers": {"undo": 0, "swap": 0, "delete": 2}
+}

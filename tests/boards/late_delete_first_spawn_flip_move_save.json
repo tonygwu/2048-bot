@@ -1,0 +1,12 @@
+{
+  "name": "late_delete_first_spawn_flip_move_save",
+  "description": "Delete-vs-move tie state where exact first-spawn expansion can prefer saving delete and taking a move.",
+  "board": [
+    [0, 0, 16, 8],
+    [2048, 512, 2, 64],
+    [0, 128, 0, 128],
+    [4, 512, 128, 1024]
+  ],
+  "score": 44720,
+  "powers": {"undo": 0, "swap": 0, "delete": 2}
+}

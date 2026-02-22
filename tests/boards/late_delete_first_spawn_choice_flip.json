@@ -1,0 +1,12 @@
+{
+  "name": "late_delete_first_spawn_choice_flip",
+  "description": "Low-empty late board where delete candidate ranking flips when first spawn is expanded exactly (delete 128 vs delete 4).",
+  "board": [
+    [64, 0, 128, 1024],
+    [4, 2048, 512, 64],
+    [4, 0, 0, 2],
+    [0, 4, 128, 64]
+  ],
+  "score": 41800,
+  "powers": {"undo": 0, "swap": 0, "delete": 2}
+}

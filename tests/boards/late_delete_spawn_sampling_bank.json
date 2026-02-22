@@ -1,0 +1,12 @@
+{
+  "name": "late_delete_spawn_sampling_bank",
+  "description": "Late board with banked power-ups where delete(8) opens 7 empties; useful for checking sampled-vs-exact first-spawn valuation.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 8, 8, 0],
+    [8, 4, 0, 0]
+  ],
+  "score": 40200,
+  "powers": {"undo": 0, "swap": 1, "delete": 2}
+}
