@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import os
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import replace
 
 from strategy_actions import Action, ActionTuple, DeleteAction, MoveAction, SwapAction, action_to_tuple
@@ -264,6 +264,39 @@ def _swap_candidate_pairs(board: list[list[int]], powers_after: dict) -> list[tu
     return [pair for _, pair in scored_pairs[:cap]]
 
 
+def _delete_candidates(board: list[list[int]], empties: int, max_tile: int) -> list[int]:
+    counts = Counter(board[r][c] for r in range(4) for c in range(4) if board[r][c] > 0)
+    candidates: list[int] = [2, 4, 8]
+    if empties <= 5:
+        candidates += [16, 32]
+    if max_tile >= 1024 and empties <= 5:
+        candidates += [64]
+    if max_tile >= 2048 and empties <= 4:
+        candidates += [128]
+    if max_tile >= 4096 and empties <= 3:
+        candidates += [256]
+
+    late_cap = max(64, max_tile // 4) if max_tile > 0 else 64
+    dup_values = sorted(v for v, cnt in counts.items() if cnt >= 2 and v <= late_cap)
+    candidates.extend(dup_values)
+
+    singleton_cap = 0
+    if max_tile >= 1024 and empties <= 4:
+        singleton_cap = max(128, max_tile // 16)
+    if singleton_cap > 0:
+        singleton_values = sorted(v for v, cnt in counts.items() if cnt == 1 and v <= singleton_cap)
+        candidates.extend(singleton_values)
+
+    out: list[int] = []
+    seen: set[int] = set()
+    for v in candidates:
+        if v not in counts or v in seen:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out
+
+
 def _legal_move_count(board: list[list[int]]) -> int:
     valid = 0
     for d in DIRECTIONS:
@@ -318,6 +351,8 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
     best_swap_act: SwapAction | None = None
     best_delete_val = float("-inf")
     best_delete_act: DeleteAction | None = None
+    empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
+    max_tile = max(board[r][c] for r in range(4) for c in range(4))
 
     for d in DIRECTIONS:
         nb, score_delta, changed = apply_move(board, d)
@@ -339,14 +374,7 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
 
     if powers["delete"] > 0:
         powers_after = {**powers, "delete": powers["delete"] - 1}
-        empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
-        candidates = [2, 4, 8]
-        if empties <= 3:
-            candidates += [16, 32]
-        present = {board[r][c] for r in range(4) for c in range(4) if board[r][c] > 0}
-        for v in candidates:
-            if v not in present:
-                continue
+        for v in _delete_candidates(board, empties=empties, max_tile=max_tile):
             nb = apply_delete(board, v)
             val = _expectimax(nb, depth - 1, False, powers_after)
             if val > best_delete_val:

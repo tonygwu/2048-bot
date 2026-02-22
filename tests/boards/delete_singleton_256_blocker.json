@@ -1,0 +1,12 @@
+{
+  "name": "delete_singleton_256_blocker",
+  "description": "Cramped 4096 board where a singleton 256 can be the best delete target, but legacy candidate rules skipped it.",
+  "board": [
+    [4, 2, 128, 64],
+    [4, 256, 8, 16],
+    [8, 0, 4, 4096],
+    [8, 16, 16, 16]
+  ],
+  "score": 60200,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}

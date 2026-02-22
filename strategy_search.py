@@ -214,17 +214,28 @@ def _swap_candidate_pairs(board: list[list[int]], powers_after: dict) -> list[tu
 def _delete_candidates(board: list[list[int]], empties: int, max_tile: int) -> list[int]:
     counts = Counter(board[r][c] for r in range(4) for c in range(4) if board[r][c] > 0)
     candidates: list[int] = [2, 4, 8]
-    if empties <= 4:
+    if empties <= 5:
         candidates += [16, 32]
-    if max_tile >= 2048 and empties <= 5:
+    if max_tile >= 1024 and empties <= 5:
         candidates += [64]
-    if max_tile >= 4096 and empties <= 4:
+    if max_tile >= 2048 and empties <= 4:
         candidates += [128]
+    if max_tile >= 4096 and empties <= 3:
+        candidates += [256]
 
     # Add duplicated values that are "small enough" relative to late-board scale.
     late_cap = max(64, max_tile // 4) if max_tile > 0 else 64
     dup_values = sorted(v for v, cnt in counts.items() if cnt >= 2 and v <= late_cap)
     candidates.extend(dup_values)
+
+    # In jammed late boards, also consider singleton clutter values, but keep
+    # this conservative so we don't burn delete on core high-chain anchors.
+    singleton_cap = 0
+    if max_tile >= 1024 and empties <= 4:
+        singleton_cap = max(128, max_tile // 16)
+    if singleton_cap > 0:
+        singleton_values = sorted(v for v, cnt in counts.items() if cnt == 1 and v <= singleton_cap)
+        candidates.extend(singleton_values)
 
     out: list[int] = []
     seen: set[int] = set()

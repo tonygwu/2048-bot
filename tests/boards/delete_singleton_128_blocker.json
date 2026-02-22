@@ -1,0 +1,12 @@
+{
+  "name": "delete_singleton_128_blocker",
+  "description": "Jammed late board with a lone 128 clutter tile. Delete should consider singleton mid-values, not just duplicated lows.",
+  "board": [
+    [64, 512, 8, 8],
+    [4, 2, 1024, 8],
+    [0, 256, 128, 64],
+    [16, 64, 1024, 256]
+  ],
+  "score": 28500,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}
