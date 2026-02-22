@@ -1,0 +1,6 @@
+{
+  "description": "late game with full powers",
+  "board": [[2048, 1024, 512, 256], [128, 64, 32, 16], [8, 4, 2, 2], [4, 8, 16, 0]],
+  "score": 0,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}

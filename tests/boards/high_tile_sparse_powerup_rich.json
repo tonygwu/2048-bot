@@ -1,0 +1,6 @@
+{
+  "description": "high tile sparse board with full powers",
+  "board": [[4096, 2048, 0, 0], [1024, 512, 0, 0], [256, 128, 64, 0], [32, 16, 8, 0]],
+  "score": 0,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}
