@@ -12,6 +12,7 @@ from strategy_actions import (
     action_to_tuple,
 )
 from strategy_config import DEFAULT_DEPTH_POLICY
+from strategy_config import DEFAULT_POWERUP_POLICY
 from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells
 from strategy_eval import _roughness, normalize_powers, score_board
 
@@ -176,19 +177,60 @@ def _top_positions(board: list[list[int]], k: int = 6) -> list[tuple[int, int]]:
     return [(r, c) for _, r, c in tiles[:k]]
 
 
+def _legal_move_count(board: list[list[int]]) -> int:
+    valid = 0
+    for d in DIRECTIONS:
+        _, _, changed = apply_move(board, d)
+        if changed:
+            valid += 1
+    return valid
+
+
+def _board_pressure(board: list[list[int]]) -> float:
+    p = DEFAULT_POWERUP_POLICY
+    empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
+    fullness = (16 - empties) / 16.0
+    valid_moves = _legal_move_count(board)
+    mobility_pressure = (4 - valid_moves) / 3.0
+    rough_pressure = min(1.0, _roughness(board) / p.pressure_roughness_norm_divisor)
+    w_sum = p.pressure_fullness_w + p.pressure_mobility_w + p.pressure_roughness_w
+    if w_sum <= 0:
+        return 0.0
+    pressure = (
+        p.pressure_fullness_w * fullness
+        + p.pressure_mobility_w * mobility_pressure
+        + p.pressure_roughness_w * rough_pressure
+    ) / w_sum
+    return max(0.0, min(1.0, pressure))
+
+
+def _required_powerup_advantage(board: list[list[int]], uses_left: int, kind: str) -> float:
+    p = DEFAULT_POWERUP_POLICY
+    pressure = _board_pressure(board)
+    # Calm boards get a higher spend bar; jammed boards relax it.
+    base_margin = p.spend_margin_calm * (1.0 - pressure) + p.spend_margin_pressure * pressure
+    reserve_margin = p.reserve_margin_per_extra_use * max(0, uses_left - 1)
+    mult = p.swap_margin_mult if kind == "swap" else p.delete_margin_mult
+    return max(0.0, (base_margin + reserve_margin) * mult)
+
+
 def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: int = 4) -> Action | None:
     powers = normalize_powers(powers)
-    best_val = float("-inf")
-    best_act: Action | None = None
+    best_move_val = float("-inf")
+    best_move_act: MoveAction | None = None
+    best_swap_val = float("-inf")
+    best_swap_act: SwapAction | None = None
+    best_delete_val = float("-inf")
+    best_delete_act: DeleteAction | None = None
 
     for d in DIRECTIONS:
         nb, score_delta, changed = apply_move(board, d)
         if not changed:
             continue
         val = _expectimax(nb, depth - 1, False, powers) + score_delta
-        if val > best_val:
-            best_val = val
-            best_act = MoveAction(direction=d)
+        if val > best_move_val:
+            best_move_val = val
+            best_move_act = MoveAction(direction=d)
 
     if powers["swap"] > 0:
         powers_after = {**powers, "swap": powers["swap"] - 1}
@@ -201,9 +243,9 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
                     continue
                 nb = apply_swap(board, r1, c1, r2, c2)
                 val = _expectimax(nb, depth - 1, False, powers_after)
-                if val > best_val:
-                    best_val = val
-                    best_act = SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
+                if val > best_swap_val:
+                    best_swap_val = val
+                    best_swap_act = SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
 
     if powers["delete"] > 0:
         powers_after = {**powers, "delete": powers["delete"] - 1}
@@ -217,10 +259,36 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
                 continue
             nb = apply_delete(board, v)
             val = _expectimax(nb, depth - 1, False, powers_after)
-            if val > best_val:
-                best_val = val
+            if val > best_delete_val:
+                best_delete_val = val
                 pos = next((r, c) for r in range(4) for c in range(4) if board[r][c] == v)
-                best_act = DeleteAction(value=v, row=pos[0], col=pos[1])
+                best_delete_act = DeleteAction(value=v, row=pos[0], col=pos[1])
+
+    # If no legal move exists, fall back to the strongest power-up action.
+    if best_move_act is None:
+        if best_swap_act is None and best_delete_act is None:
+            return None
+        if best_swap_act is None:
+            return best_delete_act
+        if best_delete_act is None:
+            return best_swap_act
+        return best_swap_act if best_swap_val >= best_delete_val else best_delete_act
+
+    best_val = best_move_val
+    best_act: Action = best_move_act
+
+    # Spend a power-up only when its expected value clears the dynamic reserve bar.
+    if best_swap_act is not None:
+        req = _required_powerup_advantage(board, uses_left=powers["swap"], kind="swap")
+        if best_swap_val >= best_move_val + req and best_swap_val > best_val:
+            best_val = best_swap_val
+            best_act = best_swap_act
+
+    if best_delete_act is not None:
+        req = _required_powerup_advantage(board, uses_left=powers["delete"], kind="delete")
+        if best_delete_val >= best_move_val + req and best_delete_val > best_val:
+            best_val = best_delete_val
+            best_act = best_delete_act
 
     return best_act
 

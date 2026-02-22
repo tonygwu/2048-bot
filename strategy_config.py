@@ -67,6 +67,17 @@ class PowerUpPolicy:
     prox_scale: float = 0.25
     prox_swap_min_tile: int = 128
     prox_delete_min_tile: int = 256
+    # Power-up spend gate: require power-up actions to beat the best move by a
+    # margin that adapts to board pressure (fullness + low mobility + roughness).
+    spend_margin_calm: float = 130.0
+    spend_margin_pressure: float = 30.0
+    reserve_margin_per_extra_use: float = 30.0
+    pressure_fullness_w: float = 0.45
+    pressure_mobility_w: float = 0.45
+    pressure_roughness_w: float = 0.10
+    pressure_roughness_norm_divisor: float = 36.0
+    swap_margin_mult: float = 1.35
+    delete_margin_mult: float = 0.9
 
 
 DEFAULT_DEPTH_POLICY = DepthPolicy()
