@@ -156,6 +156,19 @@ Use these definitions consistently when comparing strategy changes:
 - `play_one_game()` handles the full lifecycle: win overlay dismissal (guard flag so DOM element persisting hidden doesn't re-trigger), stuck-board detection (5 unchanged consecutive moves), and power-up tracking.
 - Prints board and status every 25 moves; announces depth bumps in auto mode.
 
+**`tests/run.py`** — Fixture-driven local simulator (no browser)
+
+- Purpose: fast debugging harness for single-board decision traces, action behavior, and power-up usage without Playwright/network variance.
+- Loads fixture JSON from `tests/boards/` (or a direct path), validates 4x4 board shape, and lists all fixtures when no board is passed.
+- Runs N simulated actions with either fixed depth (`--depth 4`) or live adaptive depth (`--depth auto`, default), printing board/eval after each step.
+- Optional introspection flags:
+  - `--scores`: print per-direction expectimax scores before each decision.
+  - `--peek`: stop after the first chosen action.
+  - `--seed`: deterministic tile-spawn randomness for reproducible traces.
+  - `--no-random`: disable tile placement to trace pure policy behavior.
+- Applies move/swap/delete actions locally, shares spawn semantics via `sim_utils.place_random_tile(...)`, and exercises undo/fallback policy checks (`analyze_undo`, `best_fallback_move`).
+- Use `tests/run.py` for qualitative debugging; use `tests/evaluator.py` for canonical aggregate metrics and A/B comparisons.
+
 **`strategy_config.py`** — Centralized tuning knobs
 - `DepthPolicy`: adaptive-depth policy constants (open/jammed/surgery/near-death thresholds and weights).
 - `EvalWeights`: coefficients for the decomposed eval feature scorer.
