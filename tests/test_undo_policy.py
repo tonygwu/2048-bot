@@ -115,6 +115,48 @@ class TestUndoPolicy(unittest.TestCase):
         self.assertEqual(fallback[0], "move")
         self.assertNotEqual(fallback[1], "right")
 
+    def test_undo_proximity_relief_depends_on_merge_proximity_not_max_tile(self) -> None:
+        board_with_prox = [
+            [2048, 1024, 512, 256],
+            [64, 64, 32, 16],
+            [8, 4, 2, 0],
+            [2, 8, 16, 0],
+        ]
+        board_without_prox = [
+            [2048, 1024, 512, 256],
+            [64, 32, 16, 8],
+            [8, 4, 2, 0],
+            [2, 8, 16, 0],
+        ]
+        mapping = {
+            _key(board_with_prox): 5000.0,
+            _key(board_without_prox): 5000.0,
+        }
+
+        def score_fn(board, _powers):
+            return mapping[_key(board)]
+
+        with_prox = analyze_undo(
+            board_before=board_with_prox,
+            powers_before={"undo": 1, "swap": 0, "delete": 0},
+            board_after=board_with_prox,
+            powers_after={"undo": 1, "swap": 0, "delete": 0},
+            planned_eval=5000.0,
+            score_board_fn=score_fn,
+            apply_move_fn=apply_move,
+        )
+        without_prox = analyze_undo(
+            board_before=board_without_prox,
+            powers_before={"undo": 1, "swap": 0, "delete": 0},
+            board_after=board_without_prox,
+            powers_after={"undo": 1, "swap": 0, "delete": 0},
+            planned_eval=5000.0,
+            score_board_fn=score_fn,
+            apply_move_fn=apply_move,
+        )
+
+        self.assertLess(with_prox.drop_trigger, without_prox.drop_trigger)
+
 
 if __name__ == "__main__":
     unittest.main()

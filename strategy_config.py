@@ -93,7 +93,10 @@ class PowerUpPolicy:
     # Spend undo more freely when we are at full bank.
     undo_bank_uses_threshold: int = 2
     undo_bank_relief: float = 60.0
-    # Spend undo a bit more freely near 128+ buildup.
+    # Spend undo more freely when the board is close to generating the next
+    # unlock tile (e.g., 64+64 toward 128).
+    undo_unlock_tile: int = 128
+    # Start considering proximity once the run has reached at least this tile.
     undo_prox_min_tile: int = 64
     undo_prox_relief: float = 35.0
     # Keep triggers bounded so we do not overfire in calm boards.

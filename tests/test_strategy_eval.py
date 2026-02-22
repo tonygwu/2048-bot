@@ -101,6 +101,44 @@ class TestStrategyEval(unittest.TestCase):
         finally:
             strategy_eval._TRANS_CACHE = original_cache
 
+    def test_swap_proximity_uses_board_structure_even_in_late_game(self) -> None:
+        board_close = [
+            [8192, 1024, 512, 256],
+            [128, 128, 32, 16],
+            [8, 4, 2, 0],
+            [2, 8, 16, 0],
+        ]
+        board_far = [
+            [8192, 1024, 512, 256],
+            [128, 64, 32, 16],
+            [8, 4, 2, 0],
+            [2, 8, 16, 0],
+        ]
+        # Keep delete at cap so only swap proximity changes here.
+        powers = {"undo": 0, "swap": 0, "delete": 2}
+        close_val = extract_eval_features(board_close, powers).powerup_value
+        far_val = extract_eval_features(board_far, powers).powerup_value
+        self.assertGreater(close_val, far_val)
+
+    def test_delete_proximity_uses_board_structure_even_in_late_game(self) -> None:
+        board_close = [
+            [8192, 4096, 1024, 512],
+            [256, 256, 64, 32],
+            [16, 8, 4, 2],
+            [2, 4, 8, 0],
+        ]
+        board_far = [
+            [8192, 4096, 1024, 512],
+            [256, 128, 64, 32],
+            [16, 8, 4, 2],
+            [2, 4, 8, 0],
+        ]
+        # Keep swap at cap so only delete proximity changes here.
+        powers = {"undo": 0, "swap": 2, "delete": 0}
+        close_val = extract_eval_features(board_close, powers).powerup_value
+        far_val = extract_eval_features(board_far, powers).powerup_value
+        self.assertGreater(close_val, far_val)
+
 
 if __name__ == "__main__":
     unittest.main()

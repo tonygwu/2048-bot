@@ -12,7 +12,7 @@ from typing import Callable
 
 from strategy_config import DEFAULT_POWERUP_POLICY, PowerUpPolicy
 from strategy_core import DIRECTIONS
-from strategy_eval import _roughness, normalize_powers
+from strategy_eval import _proximity_to_next_unlock, _roughness, normalize_powers
 
 Board = list[list[int]]
 ActionTuple = tuple
@@ -86,7 +86,8 @@ def _effective_trigger(
 
     max_tile = max(v for row in board_before for v in row)
     if max_tile >= policy.undo_prox_min_tile:
-        threshold -= policy.undo_prox_relief
+        undo_prox = _proximity_to_next_unlock(board_before, policy.undo_unlock_tile)
+        threshold -= policy.undo_prox_relief * undo_prox
 
     threshold = max(policy.undo_trigger_floor, threshold)
     return threshold, pressure

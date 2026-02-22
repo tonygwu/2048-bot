@@ -13,7 +13,7 @@ from transposition_cache import TranspositionCache
 
 # Bump this string whenever heuristic weights or eval logic changes.
 # The SQLite cache stores scores per-version; stale entries are ignored.
-SCORE_BOARD_VERSION = "1.3"
+SCORE_BOARD_VERSION = "1.4"
 
 _TRANS_CAP = 500_000
 _TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
@@ -196,13 +196,41 @@ def _legal_move_count(board: list[list[int]]) -> int:
     return count
 
 
-def _proximity_to_unlock(max_tile: int, unlock_tile: int) -> float:
-    if max_tile <= 0 or max_tile >= unlock_tile:
+def _proximity_to_next_unlock(board: list[list[int]], unlock_tile: int) -> float:
+    """Estimate proximity to generating the next unlock tile from board structure.
+
+    The score is in [0, 1] and tracks how close existing equal-tile pairs are to
+    producing `unlock_tile` on a subsequent merge. This remains meaningful even
+    when max tile is already far above the unlock threshold.
+    """
+    if unlock_tile <= 2:
         return 0.0
-    return math.log2(max_tile) / math.log2(unlock_tile)
+    target_log = math.log2(unlock_tile)
+    best = 0.0
+
+    for r in range(4):
+        for c in range(4):
+            v = board[r][c]
+            if v <= 0 or v >= unlock_tile:
+                continue
+            produced = min(unlock_tile, v * 2)
+            score = math.log2(produced) / target_log
+            if score <= 0:
+                continue
+            if c + 1 < 4 and board[r][c + 1] == v:
+                best = max(best, score)
+            if r + 1 < 4 and board[r + 1][c] == v:
+                best = max(best, score)
+            # One-gap pairs are weaker but still often one move away from merging.
+            if c + 2 < 4 and board[r][c + 1] == 0 and board[r][c + 2] == v:
+                best = max(best, 0.75 * score)
+            if r + 2 < 4 and board[r + 1][c] == 0 and board[r + 2][c] == v:
+                best = max(best, 0.75 * score)
+
+    return max(0.0, min(1.0, best))
 
 
-def _powerup_value(max_tile: int, powers: dict) -> float:
+def _powerup_value(board: list[list[int]], max_tile: int, powers: dict) -> float:
     if not powers or max_tile <= 0:
         return 0.0
 
@@ -215,9 +243,9 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
     prox_swap = 0.0
     prox_delete = 0.0
     if max_tile >= p.prox_swap_min_tile and swap_uses < p.max_swap_uses:
-        prox_swap = p.prox_scale * _proximity_to_unlock(max_tile, p.swap_unlock_tile)
+        prox_swap = p.prox_scale * _proximity_to_next_unlock(board, p.swap_unlock_tile)
     if max_tile >= p.prox_delete_min_tile and delete_uses < p.max_delete_uses:
-        prox_delete = p.prox_scale * _proximity_to_unlock(max_tile, p.delete_unlock_tile)
+        prox_delete = p.prox_scale * _proximity_to_next_unlock(board, p.delete_unlock_tile)
 
     effective_swaps = swap_uses + prox_swap
     effective_deletes = delete_uses + prox_delete
@@ -249,7 +277,7 @@ def extract_eval_features(board: list[list[int]], powers: dict | None = None) ->
         sum_log=math.log2(tile_sum + 1.0),
         legal_moves=_legal_move_count(board),
         corner_max_log=corner_max_log,
-        powerup_value=_powerup_value(max_val, powers),
+        powerup_value=_powerup_value(board, max_val, powers),
         promotion_progress=promotion_progress,
         high_merge_potential=_high_merge_potential(board, max_val),
     )
