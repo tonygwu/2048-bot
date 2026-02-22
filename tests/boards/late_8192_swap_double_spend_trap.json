@@ -1,0 +1,12 @@
+{
+  "name": "late_8192_swap_double_spend_trap",
+  "description": "State after one early swap in the 8192 probe line; tests whether spending the last swap immediately is actually robust.",
+  "board": [
+    [8192, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 4, 2, 4],
+    [8, 2048, 2, 2]
+  ],
+  "score": 154200,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}

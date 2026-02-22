@@ -1,0 +1,12 @@
+{
+  "name": "late_powerup_swap_margin_probe",
+  "description": "Late 2048 board where move and swap values are close; useful for checking swap spend margins and short-horizon bias.",
+  "board": [
+    [2048, 2048, 0, 0],
+    [2, 4, 16, 4],
+    [16, 0, 0, 0],
+    [4, 2, 2, 0]
+  ],
+  "score": 4128,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}

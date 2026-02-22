@@ -1,0 +1,12 @@
+{
+  "name": "late_8192_swap_probe",
+  "description": "Post-8192 near-jammed board with a stranded 2048 and swap banked to probe late-game swap timing/target quality.",
+  "board": [
+    [8192, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 4, 2, 4],
+    [2, 2048, 8, 0]
+  ],
+  "score": 154200,
+  "powers": {"undo": 0, "swap": 2, "delete": 0}
+}
