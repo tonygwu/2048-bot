@@ -105,6 +105,10 @@ class PowerUpPolicy:
     # Require a meaningful relative cliff before spending Undo.
     undo_drop_ratio_trigger: float = 0.08
     undo_plan_gap_ratio_trigger: float = 0.03
+    # Plan-gap-only undo can overfire when spawn randomness shifts expected value
+    # despite a materially improved realized board. Allow this much improvement
+    # before suppressing a plan-gap-only undo trigger.
+    undo_plan_gap_gain_tolerance: float = 120.0
     # Late-stage promotion: when max tile is very high but runner-up tile is still
     # behind, relax spend margins to allow tactical swap/delete intervention.
     late_stage_tile_threshold: int = 4096

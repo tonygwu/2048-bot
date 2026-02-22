@@ -197,10 +197,15 @@ def analyze_undo(
     )
 
     reasons: list[str] = []
-    if eval_drop >= drop_trigger and eval_drop_ratio >= policy.undo_drop_ratio_trigger:
+    eval_drop_triggered = eval_drop >= drop_trigger and eval_drop_ratio >= policy.undo_drop_ratio_trigger
+    if eval_drop_triggered:
         reasons.append("eval_drop")
-    if plan_gap >= gap_trigger and plan_gap_ratio >= policy.undo_plan_gap_ratio_trigger:
-        reasons.append("plan_gap")
+
+    plan_gap_triggered = plan_gap >= gap_trigger and plan_gap_ratio >= policy.undo_plan_gap_ratio_trigger
+    if plan_gap_triggered:
+        realized_gain = eval_after - eval_before
+        if eval_drop_triggered or realized_gain <= policy.undo_plan_gap_gain_tolerance:
+            reasons.append("plan_gap")
 
     should_undo = powers_after_n.get("undo", 0) > 0 and bool(reasons)
     return UndoDecision(

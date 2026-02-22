@@ -87,6 +87,47 @@ class TestEvaluatorHelpers(unittest.TestCase):
         self.assertAlmostEqual(think_deltas[0], 0.2, places=9)
         self.assertAlmostEqual(think_deltas[1], 0.1, places=9)
 
+    def test_aggregate_includes_promotion_and_undo_fp_metrics(self) -> None:
+        runs = [
+            {
+                "moves": 10,
+                "actions": {"move": 8, "swap": 0, "delete": 0, "undo": 2},
+                "think_ms_samples": [1.0, 2.0],
+                "cache_hits": 2,
+                "cache_misses": 1,
+                "undo_used": 2,
+                "undo_early_used": 1,
+                "undo_plan_gap_only_used": 1,
+                "undo_plan_gap_false_positive_used": 1,
+                "undo_successes": 1,
+                "undo_avg_immediate_recovery": 50.0,
+                "score": 1000,
+                "max_tile": 8192,
+                "second_max_tile": 4096,
+                "initial_second_max_tile": 2048,
+                "peak_second_max_tile": 4096,
+                "second_max_gain": 2048,
+                "second_log_gain": 1.0,
+                "promotion_stalled": False,
+                "reach2048": True,
+                "reach4096": True,
+                "reach8192": True,
+                "reach16384": False,
+                "second_ge4096": True,
+                "second_ge8192": False,
+                "peak_second_ge4096": True,
+                "peak_second_ge8192": False,
+                "survived_to_cap": False,
+                "final_eval": 123.0,
+                "think_ms_total": 20.0,
+            }
+        ]
+        agg = evaluator._aggregate(runs, bootstrap_count=0)
+        self.assertAlmostEqual(agg["avg_second_gain"], 2048.0, places=9)
+        self.assertAlmostEqual(agg["promotion_stall_pct"], 0.0, places=9)
+        self.assertAlmostEqual(agg["peak_second_ge4096_pct"], 100.0, places=9)
+        self.assertAlmostEqual(agg["undo_plan_gap_false_positive_rate_pct"], 50.0, places=9)
+
 
 if __name__ == "__main__":
     unittest.main()

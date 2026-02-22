@@ -1,0 +1,16 @@
+{
+  "name": "promotion_8192_post2048_sparse",
+  "description": "Post-merge 8192+2048 sparse board. Policy should keep promotion momentum toward 4096 runner-up instead of churning low tiles.",
+  "board": [
+    [8192, 2048, 32, 0],
+    [4, 8, 4, 0],
+    [2, 0, 0, 0],
+    [0, 2, 0, 0]
+  ],
+  "score": 130282,
+  "powers": {
+    "undo": 0,
+    "swap": 0,
+    "delete": 0
+  }
+}

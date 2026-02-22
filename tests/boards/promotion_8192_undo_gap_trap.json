@@ -1,0 +1,16 @@
+{
+  "name": "promotion_8192_undo_gap_trap",
+  "description": "8192 late board where spawn mismatch can create large plan-gap despite improved realized eval. Undo should avoid false-positive spending.",
+  "board": [
+    [8192, 2048, 16, 4],
+    [2, 2, 0, 0],
+    [8, 4, 0, 2],
+    [2, 0, 0, 0]
+  ],
+  "score": 130206,
+  "powers": {
+    "undo": 2,
+    "swap": 1,
+    "delete": 2
+  }
+}

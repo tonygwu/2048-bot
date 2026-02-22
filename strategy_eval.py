@@ -264,8 +264,16 @@ def extract_eval_features(board: list[list[int]], powers: dict | None = None) ->
     max_log = math.log2(max_val) if max_val > 0 else 0.0
     second_log = math.log2(second_val) if second_val > 0 else 0.0
     # Late-game promotion pressure: encourage building up the next-largest tile
-    # once we've already reached 2048+.
-    promotion_progress = second_log if max_log >= 11.0 else 0.0
+    # once we've already reached 2048+, and amplify this in 4096+/8192+ stages
+    # where the main bottleneck is promoting the runner-up tile toward 16384.
+    promotion_progress = 0.0
+    if max_log >= 11.0 and second_log > 0.0:
+        stage_mult = 1.0
+        if max_log >= 13.0:
+            stage_mult = 1.6
+        elif max_log >= 12.0:
+            stage_mult = 1.25
+        promotion_progress = second_log * stage_mult
     corner_max_log = max_log if max_val > 0 and board[0][0] == max_val else 0.0
     return EvalFeatures(
         empties=empties,
