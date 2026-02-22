@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 from sim_utils import place_random_tile
 from strategy import (
     DIRECTIONS,
+    SCORE_BOARD_VERSION,
     apply_delete,
     apply_move,
     apply_swap,
@@ -285,6 +286,7 @@ examples:
         help="Do not place random tiles after moves (trace decisions without noise)",
     )
     args = parser.parse_args()
+    print(f"Using SCORE_BOARD_VERSION={SCORE_BOARD_VERSION!r}")
 
     if args.board is None:
         print(f"Available boards in {BOARDS_DIR.relative_to(ROOT)}:")

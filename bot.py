@@ -709,6 +709,7 @@ async def play_one_game(page, depth_arg, game_num: int, profiler: ProfileLogger 
 async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -> None:
     label = "auto" if depth_arg is None else str(depth_arg)
     print(f"Launching 2048 bot  (depth={label}, games={num_games}, headless={headless})")
+    print(f"Using SCORE_BOARD_VERSION={SCORE_BOARD_VERSION!r}")
     profile_path = _resolve_profile_log_path(profile_log)
     profiler = ProfileLogger(profile_path)
     if profiler.enabled and profiler.path is not None:
