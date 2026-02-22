@@ -25,7 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sim_utils import place_random_tile
+from sim_utils import count_created_tile, place_random_tile, recharge_delete_uses
 from strategy import (
     DIRECTIONS,
     SCORE_BOARD_VERSION,
@@ -158,11 +158,13 @@ def apply_action(
 
     if action_type == "move":
         _, direction = action
+        created_512 = count_created_tile(next_board, direction, 512)
         moved, delta, changed = apply_move(next_board, direction)
         if not changed:
             raise ValueError(f"Invalid move action (no board change): {action!r}")
         next_board = moved
         next_score += delta
+        next_powers = recharge_delete_uses(next_powers, created_512)
     elif action_type == "swap":
         _, r1, c1, r2, c2 = action
         next_board = apply_swap(next_board, r1, c1, r2, c2)
@@ -267,8 +269,10 @@ def run(
 
         if action_type == "move":
             direction         = action[1]
+            created_512 = count_created_tile(board, direction, 512)
             _, delta, _ = apply_move(board, direction)
-            print(f"  → move {direction}  (+{delta} pts)  [{think:.0f} ms]")
+            extra = f"  (+D{created_512})" if created_512 > 0 else ""
+            print(f"  → move {direction}  (+{delta} pts){extra}  [{think:.0f} ms]")
 
         elif action_type == "swap":
             _, r1, c1, r2, c2 = action

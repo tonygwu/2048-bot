@@ -1,0 +1,12 @@
+{
+  "name": "promotion_8192_delete_undo_trap_a",
+  "description": "Sparse 8192+2048 board where immediate delete(4) often looks good but is frequently undone after spawn.",
+  "board": [
+    [8192, 2048, 0, 0],
+    [0, 4, 0, 0],
+    [8, 0, 4, 8],
+    [16, 8, 8, 0]
+  ],
+  "score": 129800,
+  "powers": {"undo": 2, "swap": 2, "delete": 2}
+}

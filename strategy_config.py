@@ -80,6 +80,12 @@ class PowerUpPolicy:
     pressure_roughness_norm_divisor: float = 36.0
     swap_margin_mult: float = 1.35
     delete_margin_mult: float = 0.9
+    # In sparse 8192+ states, conserve delete unless it clearly dominates;
+    # these boards often have high spawn variance and can trigger undo churn.
+    delete_patience_min_tile: int = 8192
+    delete_patience_min_empties: int = 7
+    delete_patience_base_margin: float = 220.0
+    delete_patience_extra_per_empty: float = 20.0
     # Swap search now scores all distinct non-empty tile pairs with the static
     # evaluator, then runs expectimax on a pressure-adaptive top-N shortlist.
     swap_pair_cap_calm: int = 20

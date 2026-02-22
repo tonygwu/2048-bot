@@ -51,7 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sim_utils import place_random_tile
+from sim_utils import count_created_tile, place_random_tile, recharge_delete_uses
 from strategy_config import DEFAULT_POWERUP_POLICY
 from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
@@ -630,12 +630,14 @@ def _simulate_one(
 
         if kind == "move":
             _, direction = action
+            created_512 = count_created_tile(board, direction, 512)
             nb, delta, changed = fns.apply_move(board, direction)
             if not changed:
                 termination_reason = "stalled_move"
                 break
             board = nb
             score += delta
+            powers = recharge_delete_uses(powers, created_512)
             if not no_random:
                 after_action_board = [row[:] for row in board]
                 board = place_random_tile(board, rng)

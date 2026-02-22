@@ -334,13 +334,20 @@ def _required_powerup_advantage(board: list[list[int]], uses_left: int, kind: st
     values = sorted((board[r][c] for r in range(4) for c in range(4)), reverse=True)
     max_tile = values[0] if values else 0
     second_tile = values[1] if len(values) > 1 else 0
+    empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
     stage_factor = 1.0
     if second_tile < p.late_stage_second_tile_threshold:
         if max_tile >= p.ultra_late_tile_threshold:
             stage_factor = p.ultra_late_margin_mult
         elif max_tile >= p.late_stage_tile_threshold:
             stage_factor = p.late_stage_margin_mult
-    return max(0.0, (base_margin + reserve_margin) * mult * stage_factor)
+    required = (base_margin + reserve_margin) * mult * stage_factor
+    if kind == "delete" and max_tile >= p.delete_patience_min_tile and empties >= p.delete_patience_min_empties:
+        required += (
+            p.delete_patience_base_margin
+            + p.delete_patience_extra_per_empty * (empties - p.delete_patience_min_empties)
+        )
+    return max(0.0, required)
 
 
 def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: int = 4) -> Action | None:

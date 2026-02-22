@@ -1,0 +1,12 @@
+{
+  "name": "promotion_8192_delete_undo_trap_b",
+  "description": "Post-8192 sparse board where opening with delete(8) has high plan-gap variance across spawn outcomes.",
+  "board": [
+    [8192, 2048, 0, 8],
+    [8, 0, 2, 4],
+    [0, 0, 8, 0],
+    [0, 0, 2, 2]
+  ],
+  "score": 129950,
+  "powers": {"undo": 2, "swap": 2, "delete": 2}
+}

@@ -39,6 +39,12 @@ class TestDeletePolicy(unittest.TestCase):
         board_256, powers_256 = _load_board("delete_singleton_256_blocker")
         self.assertEqual(best_action(board_256, powers_256, depth=4), ("delete", 256, 1, 1))
 
+    def test_sparse_8192_delete_trap_can_prefer_non_delete(self) -> None:
+        board, powers = _load_board("promotion_8192_delete_undo_trap_b")
+        action = best_action(board, powers, depth=4)
+        self.assertIsNotNone(action)
+        self.assertNotEqual(action[0], "delete")
+
     def test_obvious_delete_choices_raise_static_eval(self) -> None:
         base_powers = {"undo": 0, "swap": 0, "delete": 0}
 

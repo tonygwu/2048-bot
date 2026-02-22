@@ -71,6 +71,40 @@ class TestRunHarness(unittest.TestCase):
                 no_random=True,
             )
 
+    def test_move_recharges_delete_on_new_512(self) -> None:
+        board = [
+            [256, 256, 256, 256],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]
+        _, _, powers = run_mod.apply_action(
+            board,
+            0,
+            {"undo": 0, "swap": 0, "delete": 0},
+            ("move", "left"),
+            rng=random.Random(0),
+            no_random=True,
+        )
+        self.assertEqual(powers["delete"], 2)
+
+    def test_move_delete_recharge_respects_bank_cap(self) -> None:
+        board = [
+            [256, 256, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]
+        _, _, powers = run_mod.apply_action(
+            board,
+            0,
+            {"undo": 0, "swap": 0, "delete": 2},
+            ("move", "left"),
+            rng=random.Random(0),
+            no_random=True,
+        )
+        self.assertEqual(powers["delete"], 2)
+
     def test_run_uses_power_aware_static_eval(self) -> None:
         fixture = {
             "name": "unit_fixture",
