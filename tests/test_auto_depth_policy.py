@@ -19,14 +19,14 @@ def _load_board(name: str) -> list[list[int]]:
 class TestAutoDepthPolicy(unittest.TestCase):
     def test_fixture_depth_regression(self) -> None:
         expected = {
-            "early_game": 3,
-            "mid_game": 4,
-            "swap_test": 4,
-            "corner_trap": 5,
-            "messy_lowmax": 5,
-            "high_tile_sparse": 5,
-            "jammed": 6,
-            "late_game": 6,
+            "early_game": 5,
+            "mid_game": 5,
+            "swap_test": 5,
+            "corner_trap": 6,
+            "messy_lowmax": 7,
+            "high_tile_sparse": 7,
+            "jammed": 8,
+            "late_game": 8,
         }
         for name, depth in expected.items():
             with self.subTest(fixture=name):

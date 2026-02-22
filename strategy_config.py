@@ -5,21 +5,21 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DepthPolicy:
-    min_depth: int = 3
-    max_depth: int = 6
-    soft_max: int = 6
+    min_depth: int = 5
+    max_depth: int = 8
+    soft_max: int = 8
     # Slight upward bias toward deeper search in open/mid-game.
-    base: float = 0.95
-    w_max: float = 0.22
+    base: float = 1.45
+    w_max: float = 0.30
     w_full: float = 1.10
     w_blocked: float = 0.75
     w_rough: float = 0.45
     rough_norm_divisor: float = 36.0
     open_empties_threshold: int = 8
-    open_penalty: float = 0.70
+    open_penalty: float = 0.40
     jammed_empties_threshold: int = 2
     # Offset baseline bump for jammed boards so late-game depth doesn't jump.
-    jammed_bonus: float = 0.23
+    jammed_bonus: float = 0.50
     low_valid_bonus_threshold: int = 2
     low_valid_bonus: float = 0.25
     # In open/mid-game boards, low legal-move count is often temporary noise.
@@ -34,7 +34,7 @@ class DepthPolicy:
     # Extra nudge for tight boards that usually need longer tactical search.
     tight_empties_threshold: int = 4
     tight_valid_threshold: int = 3
-    tight_bonus: float = 0.35
+    tight_bonus: float = 0.50
     near_death_empties_threshold: int = 1
     # Depth-6 should remain rare, but allow two-move late-game traps.
     near_death_valid_threshold: int = 2
