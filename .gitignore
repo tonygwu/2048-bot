@@ -5,3 +5,4 @@ __pycache__/
 *.jpg
 *.jpeg
 cache/transposition.db
+.eval_artifacts/

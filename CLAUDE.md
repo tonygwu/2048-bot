@@ -49,6 +49,12 @@ pypy3.10 -m venv .venv
 .venv/bin/python tests/evaluator.py --suite fixtures --depths 3,4,5 --seeds 30 --moves 80
 .venv/bin/python tests/evaluator.py --suite fixtures --boards late_game,jammed --depths 4 --per-fixture
 .venv/bin/python tests/evaluator.py --suite depth_calibration --depths 2,3,4,5 --seeds 5 --moves 25
+.venv/bin/python tests/evaluator.py --suite fixtures --depths 3,4 --module strategy_powerup_weighted --run-label powerup-policy-v2
+
+# Evaluator artifacts (auto-saved by default)
+cat .eval_artifacts/LATEST_RUN.txt
+ls -lah "$(cat .eval_artifacts/LATEST_RUN.txt)"
+head -n 5 "$(cat .eval_artifacts/LATEST_RUN.txt)/moves.jsonl"
 
 # Compatibility wrapper (delegates to tests/evaluator.py depth_calibration suite)
 # Deprecated for new experiments: prefer tests/evaluator.py directly.
@@ -177,6 +183,7 @@ Use these definitions consistently when comparing strategy changes:
 ## Evaluator Notes
 
 - `tests/evaluator.py` is the canonical offline harness for depth/heuristic experiments.
+- Evaluator artifacts are auto-written by default under `.eval_artifacts/` (gitignored). Each run gets a folder named with timestamp + suite + module + depths + seed range (+ optional `--run-label`), plus `.eval_artifacts/LATEST_RUN.txt` points to the newest run.
 - Core summary metrics: `avg_score`, `avg_max`, `survive%`, `reach2048%`, `reach4096%`, `reach8192%`, `avg_moves`.
 - Diagnostics: `avg_eval`, `avg_think_ms`, `think_p50/think_p90/think_p99`, `cache_hit_rate%`, action mix (`move/swap/delete`).
 - CI bands: summary includes bootstrap 95% CIs for `avg_score`, `avg_max`, `avg_eval` (configured by `--bootstraps`).
@@ -189,12 +196,16 @@ Use these definitions consistently when comparing strategy changes:
 - ETA is printed during seed progress logs (`overall=X/Y eta=...`).
 - Resume support: `--resume` reuses completed `(depth, fixture, seed)` rows from `--jsonl-out`.
 - Resume safety: `--resume` requires a manifest alongside JSONL; evaluator validates config/fixture fingerprint/module name before resuming.
+- Auto-resume convenience: with artifacts enabled and no explicit `--jsonl-out`, `--resume` targets the run pointed to by `.eval_artifacts/LATEST_RUN.txt`.
 - Parallelism: `--jobs N` uses multiprocessing when available and auto-falls back to single-process if the environment blocks process pools.
 - Checkpoint snapshots: `--checkpoint-out` writes periodic and final progress snapshots (`--checkpoint-every` controls cadence).
 - Guardrails: `--fail-if-score-drop X` and `--fail-if-think-increase Y` enforce CI thresholds in A/B and module-compare modes (non-zero exit on failure).
+- Artifact controls: `--artifacts-dir`, `--run-label`, and `--no-artifacts` control default artifact behavior; `--trace-jsonl-out` can override the move-trace path.
 - Structured output:
   - `--json-out`: aggregate summary/per-fixture payload (includes git SHA and timestamp).
   - `--jsonl-out`: one row per run (depth + fixture + seed + run metrics).
+  - `--trace-jsonl-out`: one row per executed move (depth + fixture + seed + step + board/action/powers/think_ms).
+  - Default artifact filenames inside each run folder: `run_info.json`, `summary.json`, `runs.jsonl`, `runs.jsonl.manifest.json`, `moves.jsonl`, `checkpoint.json`.
   - JSON includes `per_group` and guardrail pass/fail context.
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):

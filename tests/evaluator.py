@@ -12,6 +12,14 @@ This script defines and computes the shared metrics used across experiments:
   - avg_moves      : average number of actions executed
 
 Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
+
+By default, each invocation also writes local artifacts under `.eval_artifacts/`:
+  - `summary.json`      : aggregate metrics for the run
+  - `runs.jsonl`        : one row per (depth, fixture, seed)
+  - `moves.jsonl`       : one row per executed move with board/action trace
+  - `runs.jsonl.manifest.json` : resume guardrails for JSONL compatibility
+  - `checkpoint.json`   : periodic + final progress snapshots
+  - `run_info.json`     : high-level metadata and output paths
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -44,6 +53,7 @@ DEFAULT_DEPTHS = [3, 4, 5]
 DEFAULT_BOOTSTRAPS = 400
 DEFAULT_AB_PERMUTATIONS = 2000
 DEFAULT_MODULE = "strategy"
+DEFAULT_ARTIFACTS_DIR = ".eval_artifacts"
 
 POWERUP_LATE_BOARDS = [
     "late_powerup_bank",
@@ -318,6 +328,47 @@ def _manifest_path(jsonl_out: str) -> Path:
     return p.with_suffix(p.suffix + ".manifest.json")
 
 
+def _slug_token(value: str, max_len: int = 48) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
+    cleaned = cleaned.strip("-._")
+    if not cleaned:
+        return "na"
+    return cleaned[:max_len]
+
+
+def _default_artifact_run_dir(
+    *,
+    artifacts_dir: str,
+    suite: str,
+    boards: set[str] | None,
+    depths: list[int],
+    seeds: int,
+    seed_start: int,
+    moves: int,
+    module_name: str,
+    candidate_module: str | None,
+    run_label: str | None,
+) -> Path:
+    ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    depth_label = "-".join(str(d) for d in depths)
+    parts = [
+        ts,
+        f"suite-{_slug_token(suite)}",
+        f"module-{_slug_token(module_name)}",
+        f"depths-{depth_label}",
+        f"seeds-{seed_start}-{seed_start + seeds - 1}",
+        f"moves-{moves}",
+    ]
+    if boards:
+        joined = "+".join(sorted(boards))
+        parts.append(f"boards-{_slug_token(joined)}")
+    if candidate_module:
+        parts.append(f"candidate-{_slug_token(candidate_module)}")
+    if run_label:
+        parts.append(f"label-{_slug_token(run_label)}")
+    return Path(artifacts_dir) / "__".join(parts)
+
+
 def _build_manifest(
     *,
     suite: str,
@@ -439,6 +490,23 @@ def _format_p_value(p_value: float | None) -> str:
     return f"{p_value:.4f}"
 
 
+def _detect_spawn(before: list[list[int]], after: list[list[int]]) -> dict | None:
+    """Infer random tile spawn position/value between two board states."""
+    added: list[tuple[int, int, int]] = []
+    for r in range(4):
+        for c in range(4):
+            b = before[r][c]
+            a = after[r][c]
+            if b == 0 and a in (2, 4):
+                added.append((r, c, a))
+            elif b != a:
+                return None
+    if len(added) != 1:
+        return None
+    r, c, value = added[0]
+    return {"r": r, "c": c, "value": value}
+
+
 def _simulate_one(
     fixture: Fixture,
     module_name: str,
@@ -458,14 +526,20 @@ def _simulate_one(
     think_ms_total = 0.0
     action_counts = {"move": 0, "swap": 0, "delete": 0}
     think_samples: list[float] = []
+    move_trace: list[dict] = []
+    termination_reason = "move_cap"
     if cache_mode == "reset-per-run" and fns.reset_trans_cache is not None:
         fns.reset_trans_cache()
     fns.reset_trans_stats()
 
     for _ in range(n_moves):
         if fns.is_game_over(board):
+            termination_reason = "game_over"
             break
 
+        board_before = [row[:] for row in board]
+        powers_before = dict(powers)
+        score_before = score
         t0 = time.perf_counter()
         action = fns.best_action(board, powers, depth=depth)
         think_ms = (time.perf_counter() - t0) * 1000.0
@@ -473,37 +547,63 @@ def _simulate_one(
         think_samples.append(think_ms)
 
         if action is None:
+            termination_reason = "no_action"
             break
 
         kind = action[0]
         action_counts[kind] += 1
+        spawn = None
 
         if kind == "move":
             _, direction = action
             nb, delta, changed = fns.apply_move(board, direction)
             if not changed:
+                termination_reason = "stalled_move"
                 break
             board = nb
             score += delta
             if not no_random:
+                after_action_board = [row[:] for row in board]
                 board = place_random_tile(board, rng)
+                spawn = _detect_spawn(after_action_board, board)
         elif kind == "swap":
             _, r1, c1, r2, c2 = action
             board = fns.apply_swap(board, r1, c1, r2, c2)
             powers = dict(powers)
             powers["swap"] = max(0, powers.get("swap", 0) - 1)
             if not no_random:
+                after_action_board = [row[:] for row in board]
                 board = place_random_tile(board, rng)
+                spawn = _detect_spawn(after_action_board, board)
         elif kind == "delete":
             _, value, _, _ = action
             board = fns.apply_delete(board, value)
             powers = dict(powers)
             powers["delete"] = max(0, powers.get("delete", 0) - 1)
             if not no_random:
+                after_action_board = [row[:] for row in board]
                 board = place_random_tile(board, rng)
+                spawn = _detect_spawn(after_action_board, board)
         else:
+            termination_reason = "unknown_action"
             break
 
+        move_trace.append(
+            {
+                "step": moves + 1,
+                "kind": kind,
+                "action": list(action),
+                "think_ms": think_ms,
+                "score_before": score_before,
+                "score_after": score,
+                "max_tile_after": max(v for row in board for v in row),
+                "powers_before": powers_before,
+                "powers_after": dict(powers),
+                "board_before": board_before,
+                "board_after": [row[:] for row in board],
+                "spawn": spawn,
+            }
+        )
         moves += 1
 
     max_tile = max(v for row in board for v in row)
@@ -527,6 +627,10 @@ def _simulate_one(
         "cache_misses": cache_stats["misses"],
         "cache_hit_rate": cache_hit_rate,
         "actions": action_counts,
+        "termination_reason": termination_reason,
+        "final_board": [row[:] for row in board],
+        "final_powers": dict(powers),
+        "trace": move_trace,
     }
 
 
@@ -605,6 +709,7 @@ def evaluate_suite(
     progress_every: int = 5,
     bootstrap_count: int = DEFAULT_BOOTSTRAPS,
     jsonl_out: str | None = None,
+    trace_jsonl_out: str | None = None,
     resume: bool = False,
     checkpoint_out: str | None = None,
     checkpoint_every: int = 25,
@@ -637,6 +742,12 @@ def evaluate_suite(
         jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         if not resume:
             jsonl_path.write_text("")
+
+    trace_jsonl_path = Path(trace_jsonl_out) if trace_jsonl_out else None
+    if trace_jsonl_path:
+        trace_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        if not resume:
+            trace_jsonl_path.write_text("")
 
     checkpoint_path = Path(checkpoint_out) if checkpoint_out else None
     if checkpoint_path:
@@ -684,6 +795,9 @@ def evaluate_suite(
                         "cache_misses": match.get("cache_misses", 0),
                         "cache_hit_rate": match.get("cache_hit_rate", 0.0),
                         "actions": match["actions"],
+                        "termination_reason": match.get("termination_reason", "resumed"),
+                        "final_board": match.get("final_board"),
+                        "final_powers": match.get("final_powers"),
                     }
                     completed_units += 1
                 else:
@@ -711,18 +825,34 @@ def evaluate_suite(
     def _on_result(depth: int, fixture_name: str, seed: int, run: dict) -> None:
         nonlocal completed_units, rows_since_checkpoint
         pk = (depth, fixture_name, seed)
-        results_by_key[pk] = run
+        trace_rows = run.get("trace", [])
+        run_no_trace = dict(run)
+        run_no_trace.pop("trace", None)
+        results_by_key[pk] = run_no_trace
         if jsonl_path:
             row = {
                 "module_name": module_name,
                 "depth": depth,
                 "fixture": fixture_name,
                 "seed": seed,
-                **run,
+                **run_no_trace,
             }
             with jsonl_path.open("a") as f:
                 f.write(json.dumps(row) + "\n")
             rows_since_checkpoint += 1
+
+        if trace_jsonl_path and trace_rows:
+            # Keep traces flat (one move per JSON line) for grep/jq-based analysis.
+            with trace_jsonl_path.open("a") as f:
+                for trace_row in trace_rows:
+                    row = {
+                        "module_name": module_name,
+                        "depth": depth,
+                        "fixture": fixture_name,
+                        "seed": seed,
+                        **trace_row,
+                    }
+                    f.write(json.dumps(row) + "\n")
 
         completed_units += 1
         elapsed = time.perf_counter() - total_start
@@ -962,7 +1092,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  .venv/bin/python tests/evaluator.py\n"
+            "  .venv/bin/python tests/evaluator.py   # writes artifacts under .eval_artifacts/\n"
             "  .venv/bin/python tests/evaluator.py --suite fixtures --depths 3,4,5 --seeds 30 --moves 80\n"
             "  .venv/bin/python tests/evaluator.py --suite depth_calibration --depths 2,3,4,5 --seeds 5 --moves 25\n"
             "  .venv/bin/python tests/evaluator.py --suite powerup_late --depths 6,7 --seeds 12 --moves 80\n"
@@ -1001,11 +1131,35 @@ def main() -> None:
     parser.add_argument("--no-random", action="store_true")
     parser.add_argument("--per-fixture", action="store_true", help="Print per-fixture metrics for each depth")
     parser.add_argument("--per-group", action="store_true", help="Print per-group (fixture tag) metrics for each depth")
-    parser.add_argument("--json-out", default=None, help="Optional path to write machine-readable JSON results")
+    parser.add_argument(
+        "--json-out",
+        default=None,
+        help="Path to write machine-readable JSON results (default: <run_dir>/summary.json when artifacts enabled)",
+    )
     parser.add_argument(
         "--jsonl-out",
         default=None,
-        help="Optional path to write one JSON object per run (JSONL)",
+        help="Path to write one JSON object per run (default: <run_dir>/runs.jsonl when artifacts enabled)",
+    )
+    parser.add_argument(
+        "--trace-jsonl-out",
+        default=None,
+        help="Path to write one JSON object per executed move (default: <run_dir>/moves.jsonl when artifacts enabled)",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        default=DEFAULT_ARTIFACTS_DIR,
+        help=f"Directory for auto-written evaluator artifacts (default: {DEFAULT_ARTIFACTS_DIR})",
+    )
+    parser.add_argument(
+        "--run-label",
+        default=None,
+        help="Optional short label appended to the artifact run folder name",
+    )
+    parser.add_argument(
+        "--no-artifacts",
+        action="store_true",
+        help="Disable automatic artifact file generation under --artifacts-dir",
     )
     parser.add_argument("--progress-every", type=int, default=5, help="Print status every N seeds (default: 5)")
     parser.add_argument("--bootstraps", type=int, default=DEFAULT_BOOTSTRAPS, help="Bootstrap samples for CI (default: 400)")
@@ -1017,7 +1171,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint-out",
         default=None,
-        help="Optional path to write periodic checkpoint snapshots",
+        help="Path to write periodic checkpoint snapshots (default: <run_dir>/checkpoint.json when artifacts enabled)",
     )
     parser.add_argument(
         "--checkpoint-every",
@@ -1074,8 +1228,6 @@ def main() -> None:
         parser.error("--fail-if-score-drop must be >= 0")
     if args.fail_if_think_increase is not None and args.fail_if_think_increase < 0:
         parser.error("--fail-if-think-increase must be >= 0")
-    if args.resume and not args.jsonl_out:
-        parser.error("--resume requires --jsonl-out")
     if args.candidate_module and args.resume:
         parser.error("--resume is not supported with --candidate-module compare mode")
     if args.powerup_weight_sweep and args.resume:
@@ -1123,6 +1275,84 @@ def main() -> None:
     except Exception as e:
         parser.error(f"failed to import strategy module(s): {e}")
 
+    artifact_run_dir: Path | None = None
+    artifacts_root = Path(args.artifacts_dir)
+    if not artifacts_root.is_absolute():
+        artifacts_root = ROOT / artifacts_root
+    latest_path = artifacts_root / "LATEST_RUN.txt"
+    if not args.no_artifacts:
+        if args.resume and args.jsonl_out is None:
+            if not latest_path.exists():
+                parser.error(
+                    "--resume requested with automatic artifacts, but no prior run was found. "
+                    "Pass --jsonl-out explicitly or run once without --resume first."
+                )
+            latest_value = latest_path.read_text().strip()
+            if not latest_value:
+                parser.error(f"--resume could not read a valid run path from {latest_path}")
+            artifact_run_dir = Path(latest_value)
+            if not artifact_run_dir.is_absolute():
+                artifact_run_dir = (artifacts_root / artifact_run_dir).resolve()
+            if not artifact_run_dir.exists():
+                parser.error(f"--resume run directory does not exist: {artifact_run_dir}")
+        else:
+            # Keep run folders human-readable so agents can quickly locate relevant runs.
+            artifact_run_dir = _default_artifact_run_dir(
+                artifacts_dir=str(artifacts_root),
+                suite=args.suite,
+                boards=selected_names,
+                depths=depths,
+                seeds=args.seeds,
+                seed_start=args.seed_start,
+                moves=args.moves,
+                module_name=args.module,
+                candidate_module=args.candidate_module,
+                run_label=args.run_label,
+            )
+            artifact_run_dir.mkdir(parents=True, exist_ok=True)
+            latest_path.parent.mkdir(parents=True, exist_ok=True)
+            latest_path.write_text(str(artifact_run_dir) + "\n")
+
+        if args.json_out is None:
+            args.json_out = str(artifact_run_dir / "summary.json")
+        if args.jsonl_out is None:
+            args.jsonl_out = str(artifact_run_dir / "runs.jsonl")
+        if args.trace_jsonl_out is None:
+            args.trace_jsonl_out = str(artifact_run_dir / "moves.jsonl")
+        if args.checkpoint_out is None:
+            args.checkpoint_out = str(artifact_run_dir / "checkpoint.json")
+        run_info = {
+            "artifact_run_dir": str(artifact_run_dir),
+            "latest_pointer": str(latest_path),
+            "git_sha": _git_sha(),
+            "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+            "argv": sys.argv,
+            "outputs": {
+                "summary_json": args.json_out,
+                "runs_jsonl": args.jsonl_out,
+                "trace_jsonl": args.trace_jsonl_out,
+                "checkpoint_json": args.checkpoint_out,
+            },
+            "config": {
+                "suite": args.suite,
+                "boards": sorted(selected_names) if selected_names else "all",
+                "depths": depths,
+                "moves": args.moves,
+                "seeds": args.seeds,
+                "seed_start": args.seed_start,
+                "module": args.module,
+                "baseline_module": args.baseline_module,
+                "candidate_module": args.candidate_module,
+                "cache_mode": args.cache_mode,
+                "resume": args.resume,
+                "jobs": args.jobs,
+            },
+        }
+        (artifact_run_dir / "run_info.json").write_text(json.dumps(run_info, indent=2))
+
+    if args.resume and not args.jsonl_out:
+        parser.error("--resume requires --jsonl-out (or automatic artifacts enabled)")
+
     _print_metric_glossary()
     print()
 
@@ -1131,6 +1361,12 @@ def main() -> None:
         f"depths={depths} moves={args.moves} seeds={args.seeds} seed_start={args.seed_start} "
         f"module={args.module} jobs={args.jobs} cache_mode={args.cache_mode}"
     )
+    if artifact_run_dir is not None:
+        print(f"[artifact] run_dir={artifact_run_dir}")
+        print(f"[artifact] summary={args.json_out}")
+        print(f"[artifact] runs={args.jsonl_out}")
+        print(f"[artifact] moves={args.trace_jsonl_out}")
+        print(f"[artifact] checkpoint={args.checkpoint_out}")
 
     # Manifest validation / setup for resume-safe runs.
     if args.jsonl_out:
@@ -1173,6 +1409,7 @@ def main() -> None:
         progress_every=args.progress_every,
         bootstrap_count=args.bootstraps,
         jsonl_out=args.jsonl_out,
+        trace_jsonl_out=args.trace_jsonl_out,
         resume=args.resume,
         checkpoint_out=args.checkpoint_out,
         checkpoint_every=args.checkpoint_every,
@@ -1567,10 +1804,18 @@ def main() -> None:
                 "failures": guardrail_failures,
                 "passed": len(guardrail_failures) == 0 if guardrail_context is not None else None,
             },
+            "artifact_run_dir": str(artifact_run_dir) if artifact_run_dir is not None else None,
             "jsonl_out": args.jsonl_out,
+            "trace_jsonl_out": args.trace_jsonl_out,
+            "manifest_out": str(_manifest_path(args.jsonl_out)) if args.jsonl_out else None,
         }
         Path(args.json_out).write_text(json.dumps(payload, indent=2))
         print(f"\nWrote JSON results: {args.json_out}")
+        if args.jsonl_out:
+            print(f"Wrote per-run JSONL: {args.jsonl_out}")
+            print(f"Wrote resume manifest: {_manifest_path(args.jsonl_out)}")
+        if args.trace_jsonl_out:
+            print(f"Wrote move trace JSONL: {args.trace_jsonl_out}")
 
     if guardrail_failures:
         sys.exit(2)
