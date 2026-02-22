@@ -1,0 +1,12 @@
+{
+  "name": "promotion_8192_second_tile_lag",
+  "description": "8192 + 2048 late board where policy must grow the second-high tile rather than churn low tiles.",
+  "board": [
+    [8192, 2048, 8, 0],
+    [2, 8, 0, 0],
+    [8, 0, 2, 0],
+    [2, 4, 0, 0]
+  ],
+  "score": 130190,
+  "powers": {"undo": 2, "swap": 2, "delete": 2}
+}

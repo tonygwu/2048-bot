@@ -270,7 +270,16 @@ def _required_powerup_advantage(board: list[list[int]], uses_left: int, kind: st
     base_margin = p.spend_margin_calm * (1.0 - pressure) + p.spend_margin_pressure * pressure
     reserve_margin = p.reserve_margin_per_extra_use * max(0, uses_left - 1)
     mult = p.swap_margin_mult if kind == "swap" else p.delete_margin_mult
-    return max(0.0, (base_margin + reserve_margin) * mult)
+    values = sorted((board[r][c] for r in range(4) for c in range(4)), reverse=True)
+    max_tile = values[0] if values else 0
+    second_tile = values[1] if len(values) > 1 else 0
+    stage_factor = 1.0
+    if second_tile < p.late_stage_second_tile_threshold:
+        if max_tile >= p.ultra_late_tile_threshold:
+            stage_factor = p.ultra_late_margin_mult
+        elif max_tile >= p.late_stage_tile_threshold:
+            stage_factor = p.late_stage_margin_mult
+    return max(0.0, (base_margin + reserve_margin) * mult * stage_factor)
 
 
 def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: int = 4) -> Action | None:

@@ -9,6 +9,8 @@ This script defines and computes the shared metrics used across experiments:
   - reach2048%     : percentage of runs that reached max tile >= 2048
   - reach4096%     : percentage of runs that reached max tile >= 4096
   - reach8192%     : percentage of runs that reached max tile >= 8192
+  - reach16384%    : percentage of runs that reached max tile >= 16384
+  - avg_second_max : average second-highest tile at end of run
   - avg_moves      : average number of actions executed
 
 Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
@@ -58,6 +60,7 @@ DEFAULT_BOOTSTRAPS = 400
 DEFAULT_AB_PERMUTATIONS = 2000
 DEFAULT_MODULE = "strategy"
 DEFAULT_ARTIFACTS_DIR = ".eval_artifacts"
+UNDO_EARLY_STEP_THRESHOLD = 8
 
 POWERUP_LATE_BOARDS = [
     "late_powerup_bank",
@@ -511,6 +514,15 @@ def _detect_spawn(before: list[list[int]], after: list[list[int]]) -> dict | Non
     return {"r": r, "c": c, "value": value}
 
 
+def _top_two_tiles(board: list[list[int]]) -> tuple[int, int]:
+    vals = sorted((v for row in board for v in row if v > 0), reverse=True)
+    if not vals:
+        return 0, 0
+    if len(vals) == 1:
+        return vals[0], 0
+    return vals[0], vals[1]
+
+
 def _simulate_one(
     fixture: Fixture,
     module_name: str,
@@ -678,7 +690,9 @@ def _simulate_one(
             "should_undo": undo_decision.should_undo,
             "reasons": list(undo_decision.reasons),
             "eval_drop": undo_decision.eval_drop,
+            "eval_drop_ratio": undo_decision.eval_drop_ratio,
             "plan_gap": undo_decision.plan_gap,
+            "plan_gap_ratio": undo_decision.plan_gap_ratio,
             "drop_trigger": undo_decision.drop_trigger,
             "gap_trigger": undo_decision.gap_trigger,
             "pressure": undo_decision.pressure,
@@ -735,7 +749,9 @@ def _simulate_one(
                     "undo_trigger": {
                         "reasons": list(undo_decision.reasons),
                         "eval_drop": undo_decision.eval_drop,
+                        "eval_drop_ratio": undo_decision.eval_drop_ratio,
                         "plan_gap": undo_decision.plan_gap,
+                        "plan_gap_ratio": undo_decision.plan_gap_ratio,
                     },
                 }
             )
@@ -747,7 +763,7 @@ def _simulate_one(
             evt["success"] = False
             evt["resolved_step"] = moves
 
-    max_tile = max(v for row in board for v in row)
+    max_tile, second_max_tile = _top_two_tiles(board)
     cache_stats = fns.get_trans_stats()
     cache_total = cache_stats["hits"] + cache_stats["misses"]
     cache_hit_rate = cache_stats["hits"] * 100.0 / cache_total if cache_total else 0.0
@@ -755,6 +771,7 @@ def _simulate_one(
     undo_successes = sum(1 for evt in undo_events if evt.get("success"))
     undo_success_rate = (undo_successes * 100.0 / undo_used) if undo_used else 0.0
     undo_eval_recovery = [evt.get("immediate_recovery", 0.0) for evt in undo_events]
+    undo_early_used = sum(1 for evt in undo_events if int(evt.get("trigger_step", 10**9)) <= UNDO_EARLY_STEP_THRESHOLD)
     return {
         "moves": moves,
         "score": score,
@@ -764,6 +781,10 @@ def _simulate_one(
         "reach2048": max_tile >= 2048,
         "reach4096": max_tile >= 4096,
         "reach8192": max_tile >= 8192,
+        "reach16384": max_tile >= 16384,
+        "second_ge4096": second_max_tile >= 4096,
+        "second_ge8192": second_max_tile >= 8192,
+        "second_max_tile": second_max_tile,
         "final_eval": fns.score_board(board, powers),
         "think_ms_total": think_ms_total,
         "think_ms_samples": think_samples,
@@ -776,6 +797,8 @@ def _simulate_one(
         "final_board": [row[:] for row in board],
         "final_powers": dict(powers),
         "undo_used": undo_used,
+        "undo_early_used": undo_early_used,
+        "undo_early_rate_pct": (undo_early_used * 100.0 / undo_used) if undo_used else 0.0,
         "undo_successes": undo_successes,
         "undo_success_rate_pct": undo_success_rate,
         "undo_avg_immediate_recovery": (
@@ -798,6 +821,7 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
     total_cache_misses = sum(r.get("cache_misses", 0) for r in runs)
     total_cache = total_cache_hits + total_cache_misses
     total_undo_used = sum(r.get("undo_used", r.get("actions", {}).get("undo", 0)) for r in runs)
+    total_undo_early_used = sum(r.get("undo_early_used", 0) for r in runs)
     total_undo_successes = sum(r.get("undo_successes", 0) for r in runs)
     undo_recovery_samples = [r.get("undo_avg_immediate_recovery", 0.0) for r in runs if r.get("undo_used", 0) > 0]
 
@@ -809,10 +833,14 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
         "runs": n,
         "avg_score": sum(r["score"] for r in runs) / n,
         "avg_max": sum(r["max_tile"] for r in runs) / n,
+        "avg_second_max": sum(r.get("second_max_tile", 0) for r in runs) / n,
         "survive_pct": sum(1 for r in runs if r["survived_to_cap"]) * 100.0 / n,
         "reach2048_pct": sum(1 for r in runs if r["reach2048"]) * 100.0 / n,
         "reach4096_pct": sum(1 for r in runs if r["reach4096"]) * 100.0 / n,
         "reach8192_pct": sum(1 for r in runs if r["reach8192"]) * 100.0 / n,
+        "reach16384_pct": sum(1 for r in runs if r.get("reach16384", False)) * 100.0 / n,
+        "second_ge4096_pct": sum(1 for r in runs if r.get("second_ge4096", False)) * 100.0 / n,
+        "second_ge8192_pct": sum(1 for r in runs if r.get("second_ge8192", False)) * 100.0 / n,
         "avg_moves": total_moves / n,
         "avg_eval": sum(r["final_eval"] for r in runs) / n,
         "avg_think_ms": (sum(r["think_ms_total"] for r in runs) / max(1, total_moves)),
@@ -830,6 +858,8 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
         "delete_pct": (sum(r["actions"].get("delete", 0) for r in runs) * 100.0 / max(1, total_actions)),
         "undo_pct": (sum(r["actions"].get("undo", 0) for r in runs) * 100.0 / max(1, total_actions)),
         "undo_used": total_undo_used,
+        "undo_early_used": total_undo_early_used,
+        "undo_early_rate_pct": (total_undo_early_used * 100.0 / total_undo_used) if total_undo_used else 0.0,
         "undo_successes": total_undo_successes,
         "undo_success_rate_pct": (total_undo_successes * 100.0 / total_undo_used) if total_undo_used else 0.0,
         "undo_avg_immediate_recovery": (
@@ -949,6 +979,10 @@ def evaluate_suite(
                         "reach2048": match["reach2048"],
                         "reach4096": match["reach4096"],
                         "reach8192": match["reach8192"],
+                        "reach16384": bool(match.get("reach16384", False)),
+                        "second_ge4096": bool(match.get("second_ge4096", False)),
+                        "second_ge8192": bool(match.get("second_ge8192", False)),
+                        "second_max_tile": int(match.get("second_max_tile", 0)),
                         "final_eval": match["final_eval"],
                         "think_ms_total": match["think_ms_total"],
                         "think_ms_samples": match.get("think_ms_samples", []),
@@ -966,6 +1000,8 @@ def evaluate_suite(
                         "final_board": match.get("final_board"),
                         "final_powers": match.get("final_powers"),
                         "undo_used": int(match.get("undo_used", 0)),
+                        "undo_early_used": int(match.get("undo_early_used", 0)),
+                        "undo_early_rate_pct": float(match.get("undo_early_rate_pct", 0.0)),
                         "undo_successes": int(match.get("undo_successes", 0)),
                         "undo_success_rate_pct": float(match.get("undo_success_rate_pct", 0.0)),
                         "undo_avg_immediate_recovery": float(match.get("undo_avg_immediate_recovery", 0.0)),
@@ -1141,6 +1177,10 @@ def _print_metric_glossary() -> None:
     print("  reach2048%   : % of runs with max tile >= 2048")
     print("  reach4096%   : % of runs with max tile >= 4096")
     print("  reach8192%   : % of runs with max tile >= 8192")
+    print("  reach16384%  : % of runs with max tile >= 16384")
+    print("  avg_second_max : average second-highest tile at end of run")
+    print("  second_ge4096% : % of runs where second-highest tile >= 4096")
+    print("  second_ge8192% : % of runs where second-highest tile >= 8192")
     print("  avg_moves    : average executed actions per run")
     print("  avg_eval     : average final score_board(board, powers)")
     print("  avg_think_ms : average best_action compute time per executed action")
@@ -1154,10 +1194,11 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
     print(title)
     print(
         "| depth | avg_score | score_ci95 | avg_max | max_ci95 | survive% | reach2048% | "
-        "reach4096% | reach8192% | avg_moves | avg_eval | eval_ci95 | avg_think_ms | "
+        "reach4096% | reach8192% | reach16384% | avg_second_max | second_ge4096% | second_ge8192% | "
+        "avg_moves | avg_eval | eval_ci95 | avg_think_ms | "
         "think_p50 | think_p90 | think_p99 | cache_hit_rate% | undo_used | undo_success% |"
     )
-    print("|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
     for r in rows:
         score_ci = f"[{r['avg_score_ci95'][0]:.1f}, {r['avg_score_ci95'][1]:.1f}]"
         max_ci = f"[{r['avg_max_ci95'][0]:.1f}, {r['avg_max_ci95'][1]:.1f}]"
@@ -1165,7 +1206,9 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
         print(
             f"| {r['depth']} | {r['avg_score']:.1f} | {score_ci} | {r['avg_max']:.1f} | {max_ci} | "
             f"{r['survive_pct']:.1f} | {r['reach2048_pct']:.1f} | {r['reach4096_pct']:.1f} | "
-            f"{r['reach8192_pct']:.1f} | {r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {eval_ci} | "
+            f"{r['reach8192_pct']:.1f} | {r.get('reach16384_pct', 0.0):.1f} | "
+            f"{r.get('avg_second_max', 0.0):.1f} | {r.get('second_ge4096_pct', 0.0):.1f} | "
+            f"{r.get('second_ge8192_pct', 0.0):.1f} | {r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {eval_ci} | "
             f"{r['avg_think_ms']:.2f} | {r['think_p50_ms']:.2f} | {r['think_p90_ms']:.2f} | "
             f"{r['think_p99_ms']:.2f} | {r['cache_hit_rate_pct']:.1f} | "
             f"{r.get('undo_used', 0)} | {r.get('undo_success_rate_pct', 0.0):.1f} |"
@@ -1176,16 +1219,19 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
     print(f"\nPer-fixture metrics (depth={depth}):")
     print(
         "| fixture | avg_score | avg_max | survive% | reach2048% | "
-        "reach4096% | reach8192% | avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
+        "reach4096% | reach8192% | reach16384% | avg_second_max | second_ge4096% | second_ge8192% | "
+        "avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
         "action_mix(move/swap/delete/undo) | undo_success% |"
     )
-    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for name in sorted(stats.keys()):
         s = stats[name]
         mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}/{s.get('undo_pct',0.0):.1f}"
         print(
             f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
             f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
+            f"{s.get('reach16384_pct', 0.0):.1f} | {s.get('avg_second_max', 0.0):.1f} | "
+            f"{s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
             f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
         )
@@ -1195,16 +1241,19 @@ def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
     print(f"\nPer-group metrics (depth={depth}):")
     print(
         "| group | avg_score | avg_max | survive% | reach2048% | "
-        "reach4096% | reach8192% | avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
+        "reach4096% | reach8192% | reach16384% | avg_second_max | second_ge4096% | second_ge8192% | "
+        "avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
         "action_mix(move/swap/delete/undo) | undo_success% |"
     )
-    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for name in sorted(stats.keys()):
         s = stats[name]
         mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}/{s.get('undo_pct',0.0):.1f}"
         print(
             f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
             f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
+            f"{s.get('reach16384_pct', 0.0):.1f} | {s.get('avg_second_max', 0.0):.1f} | "
+            f"{s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
             f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
         )

@@ -1,0 +1,12 @@
+{
+  "name": "promotion_8192_power_bank",
+  "description": "Post-8192 board with banked powers to test whether policy spends power-ups to keep promotion momentum toward 16384.",
+  "board": [
+    [8192, 1024, 512, 0],
+    [256, 128, 64, 0],
+    [32, 16, 8, 0],
+    [4, 2, 0, 0]
+  ],
+  "score": 126050,
+  "powers": {"undo": 2, "swap": 2, "delete": 2}
+}

@@ -98,6 +98,17 @@ class PowerUpPolicy:
     undo_prox_relief: float = 35.0
     # Keep triggers bounded so we do not overfire in calm boards.
     undo_trigger_floor: float = 70.0
+    # Absolute drops can be noisy at high eval scales; require relative cliffs too.
+    # Require a meaningful relative cliff before spending Undo.
+    undo_drop_ratio_trigger: float = 0.08
+    undo_plan_gap_ratio_trigger: float = 0.03
+    # Late-stage promotion: when max tile is very high but runner-up tile is still
+    # behind, relax spend margins to allow tactical swap/delete intervention.
+    late_stage_tile_threshold: int = 4096
+    ultra_late_tile_threshold: int = 8192
+    late_stage_second_tile_threshold: int = 4096
+    late_stage_margin_mult: float = 0.65
+    ultra_late_margin_mult: float = 0.40
     # When measuring whether undo paid off, look ahead this many actions.
     undo_success_horizon_actions: int = 4
     undo_success_margin: float = 120.0

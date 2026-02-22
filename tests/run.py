@@ -38,6 +38,7 @@ from strategy import (
     score_board,
     _expectimax,
 )
+from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
 
 # ── Lightweight board display (no playwright dependency) ──────────────────────
@@ -114,7 +115,7 @@ def list_boards() -> None:
             print(f"  {b.stem}  (parse error: {e})")
 
 
-def direction_scores(board: list[list[int]], depth: int) -> list[tuple[str, float | None]]:
+def direction_scores(board: list[list[int]], depth: int, powers: dict | None = None) -> list[tuple[str, float | None]]:
     """Return (direction, expectimax_value) for each direction, None if the move is invalid."""
     result = []
     for d in DIRECTIONS:
@@ -122,13 +123,13 @@ def direction_scores(board: list[list[int]], depth: int) -> list[tuple[str, floa
         if not changed:
             result.append((d, None))
             continue
-        val = _expectimax(nb, max(0, depth - 1), False) + delta
+        val = _expectimax(nb, max(0, depth - 1), False, powers=powers) + delta
         result.append((d, val))
     return result
 
 
-def print_direction_scores(board: list[list[int]], depth: int) -> None:
-    scores = direction_scores(board, depth)
+def print_direction_scores(board: list[list[int]], depth: int, powers: dict | None = None) -> None:
+    scores = direction_scores(board, depth, powers=powers)
     valid = [(d, v) for d, v in scores if v is not None]
     best_d = max(valid, key=lambda x: x[1])[0] if valid else None
     print("  Direction scores:")
@@ -138,6 +139,44 @@ def print_direction_scores(board: list[list[int]], depth: int) -> None:
         else:
             marker = "  ◀ best" if d == best_d else ""
             print(f"    {d:<6}: {val:>12.1f}{marker}")
+
+
+def apply_action(
+    board: list[list[int]],
+    score: int,
+    powers: dict,
+    action: tuple,
+    *,
+    rng: random.Random,
+    no_random: bool,
+) -> tuple[list[list[int]], int, dict]:
+    """Apply one action in the local simulator and return updated state."""
+    action_type = action[0]
+    next_board = [row[:] for row in board]
+    next_score = int(score)
+    next_powers = dict(powers)
+
+    if action_type == "move":
+        _, direction = action
+        moved, delta, changed = apply_move(next_board, direction)
+        if not changed:
+            raise ValueError(f"Invalid move action (no board change): {action!r}")
+        next_board = moved
+        next_score += delta
+    elif action_type == "swap":
+        _, r1, c1, r2, c2 = action
+        next_board = apply_swap(next_board, r1, c1, r2, c2)
+        next_powers["swap"] = max(0, next_powers.get("swap", 0) - 1)
+    elif action_type == "delete":
+        _, value, _, _ = action
+        next_board = apply_delete(next_board, value)
+        next_powers["delete"] = max(0, next_powers.get("delete", 0) - 1)
+    else:
+        raise ValueError(f"Unknown action type: {action_type!r}")
+
+    if not no_random:
+        next_board = place_random_tile(next_board, rng)
+    return next_board, next_score, next_powers
 
 
 # ── Main simulation loop ──────────────────────────────────────────────────────
@@ -169,20 +208,27 @@ def run(
 
     print(f"\nInitial state  (score={score}, max={max_tile}, depth={depth})")
     print_board(board, score=score, powers=powers)
-    print(f"  Static eval: {score_board(board):.1f}")
+    print(f"  Static eval: {score_board(board, powers):.1f}")
 
     if is_game_over(board):
         print("\nThis board is already game-over — no moves possible.")
         return
 
-    for move_num in range(1, num_moves + 1):
+    action_num = 0
+    blocked_action_once = None
+    while action_num < num_moves:
         max_tile = max(v for row in board for v in row)
         depth    = fixed_depth if fixed_depth is not None else auto_depth(board)
+        move_num = action_num + 1
 
         print(f"\n── Move {move_num}  (depth={depth}, max_tile={max_tile}) {'─'*30}")
 
         if show_scores:
-            print_direction_scores(board, depth)
+            print_direction_scores(board, depth, powers=powers)
+
+        board_before = [row[:] for row in board]
+        powers_before = dict(powers)
+        score_before = score
 
         t0     = time.perf_counter()
         action = best_action(board, powers, depth=depth)
@@ -192,41 +238,95 @@ def run(
             print("  No valid action — game over.")
             break
 
+        if blocked_action_once is not None and action == blocked_action_once:
+            blocked_direction = blocked_action_once[1] if blocked_action_once[0] == "move" else None
+            fallback = best_fallback_move(
+                board=board,
+                powers=powers,
+                depth=depth,
+                blocked_direction=blocked_direction,
+                apply_move_fn=apply_move,
+                score_board_fn=score_board,
+                expectimax_fn=_expectimax,
+            )
+            if fallback is not None:
+                print(f"  (undo retry) avoid repeating {blocked_action_once} -> {fallback}")
+                action = fallback
+        blocked_action_once = None
+
         action_type = action[0]
+        planned_eval = projected_action_eval(
+            board_before,
+            powers_before,
+            action,
+            score_board_fn=score_board,
+            apply_move_fn=apply_move,
+            apply_swap_fn=apply_swap,
+            apply_delete_fn=apply_delete,
+        )
 
         if action_type == "move":
             direction         = action[1]
-            new_board, delta, changed = apply_move(board, direction)
-            score            += delta
+            _, delta, _ = apply_move(board, direction)
             print(f"  → move {direction}  (+{delta} pts)  [{think:.0f} ms]")
-            if not changed:
-                print("  (board didn't change — bug?)")
-                break
-            board = new_board
-            if not no_random:
-                board = place_random_tile(board, rng)
 
         elif action_type == "swap":
             _, r1, c1, r2, c2 = action
             v1, v2 = board[r1][c1], board[r2][c2]
             print(f"  → SWAP {v1}@({r1},{c1}) ↔ {v2}@({r2},{c2})  [{think:.0f} ms]")
-            board = apply_swap(board, r1, c1, r2, c2)
-            powers = dict(powers)
-            powers["swap"] = max(0, powers.get("swap", 0) - 1)
-            if not no_random:
-                board = place_random_tile(board, rng)
 
         elif action_type == "delete":
             _, value, row, col = action
             print(f"  → DELETE all {value}-tiles  [{think:.0f} ms]")
-            board = apply_delete(board, value)
-            powers = dict(powers)
-            powers["delete"] = max(0, powers.get("delete", 0) - 1)
-            if not no_random:
-                board = place_random_tile(board, rng)
+        else:
+            print(f"  Unknown action type: {action_type!r}")
+            break
+
+        try:
+            board, score, powers = apply_action(
+                board,
+                score,
+                powers,
+                action,
+                rng=rng,
+                no_random=no_random,
+            )
+        except ValueError as exc:
+            print(f"  Action failed: {exc}")
+            break
+
+        action_num += 1
 
         print_board(board, score=score, powers=powers)
-        print(f"  Static eval: {score_board(board):.1f}")
+        eval_after = score_board(board, powers)
+        print(f"  Static eval: {eval_after:.1f}")
+
+        undo_decision = analyze_undo(
+            board_before=board_before,
+            powers_before=powers_before,
+            board_after=board,
+            powers_after=powers,
+            planned_eval=planned_eval,
+            score_board_fn=score_board,
+            apply_move_fn=apply_move,
+        )
+        if undo_decision.should_undo and action_num < num_moves:
+            powers = dict(powers_before)
+            powers["undo"] = max(0, powers.get("undo", 0) - 1)
+            board = [row[:] for row in board_before]
+            score = score_before
+            blocked_action_once = action
+            action_num += 1
+            reasons = ",".join(undo_decision.reasons)
+            print(
+                f"  → UNDO ({reasons}) "
+                f"drop={undo_decision.eval_drop:.1f}/{undo_decision.drop_trigger:.1f} "
+                f"gap={undo_decision.plan_gap:.1f}/{undo_decision.gap_trigger:.1f} "
+                f"drop%={undo_decision.eval_drop_ratio*100:.1f} "
+                f"gap%={undo_decision.plan_gap_ratio*100:.1f}"
+            )
+            print_board(board, score=score, powers=powers)
+            print(f"  Static eval after undo: {score_board(board, powers):.1f}")
 
         if is_game_over(board):
             print("\n  Game over — no moves remain.")

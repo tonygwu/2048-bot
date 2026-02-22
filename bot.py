@@ -553,6 +553,8 @@ async def play_one_game(page, depth_arg, game_num: int, profiler: ProfileLogger 
                 f"\n[Move {move_count}]  *** UNDO trigger ({reasons}) *** "
                 f"drop={undo_decision.eval_drop:.1f}/{undo_decision.drop_trigger:.1f} "
                 f"gap={undo_decision.plan_gap:.1f}/{undo_decision.gap_trigger:.1f} "
+                f"drop%={undo_decision.eval_drop_ratio*100:.1f} "
+                f"gap%={undo_decision.plan_gap_ratio*100:.1f} "
                 f"pressure={undo_decision.pressure:.2f}"
             )
             board_after_action = [row[:] for row in post_action_state.board]

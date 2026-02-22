@@ -25,8 +25,10 @@ class UndoDecision:
     eval_before: float
     eval_after: float
     eval_drop: float
+    eval_drop_ratio: float
     planned_eval: float
     plan_gap: float
+    plan_gap_ratio: float
     drop_trigger: float
     gap_trigger: float
     pressure: float
@@ -174,6 +176,10 @@ def analyze_undo(
 
     eval_drop = eval_before - eval_after
     plan_gap = planned - eval_after
+    eval_scale = max(1.0, abs(eval_before))
+    plan_scale = max(1.0, abs(planned))
+    eval_drop_ratio = eval_drop / eval_scale
+    plan_gap_ratio = plan_gap / plan_scale
     drop_trigger, pressure = _effective_trigger(
         base_trigger=policy.undo_drop_trigger,
         board_before=board_before,
@@ -190,9 +196,9 @@ def analyze_undo(
     )
 
     reasons: list[str] = []
-    if eval_drop >= drop_trigger:
+    if eval_drop >= drop_trigger and eval_drop_ratio >= policy.undo_drop_ratio_trigger:
         reasons.append("eval_drop")
-    if plan_gap >= gap_trigger:
+    if plan_gap >= gap_trigger and plan_gap_ratio >= policy.undo_plan_gap_ratio_trigger:
         reasons.append("plan_gap")
 
     should_undo = powers_after_n.get("undo", 0) > 0 and bool(reasons)
@@ -202,8 +208,10 @@ def analyze_undo(
         eval_before=eval_before,
         eval_after=eval_after,
         eval_drop=eval_drop,
+        eval_drop_ratio=eval_drop_ratio,
         planned_eval=planned,
         plan_gap=plan_gap,
+        plan_gap_ratio=plan_gap_ratio,
         drop_trigger=drop_trigger,
         gap_trigger=gap_trigger,
         pressure=pressure,
