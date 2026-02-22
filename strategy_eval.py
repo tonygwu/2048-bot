@@ -13,7 +13,7 @@ from transposition_cache import TranspositionCache
 
 # Bump this string whenever heuristic weights or eval logic changes.
 # The SQLite cache stores scores per-version; stale entries are ignored.
-SCORE_BOARD_VERSION = "1.4"
+SCORE_BOARD_VERSION = "1.5"
 
 _TRANS_CAP = 500_000
 _TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
