@@ -23,6 +23,7 @@ import hashlib
 import importlib
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -141,6 +142,15 @@ def _parse_names(raw: str | None) -> set[str] | None:
     return {x.strip() for x in raw.split(",") if x.strip()}
 
 
+def _parse_float_list(raw: str) -> list[float]:
+    vals = [float(x.strip()) for x in raw.split(",") if x.strip()]
+    if not vals:
+        raise ValueError("must provide at least one numeric value")
+    if any(not math.isfinite(v) for v in vals):
+        raise ValueError("values must be finite numbers")
+    return vals
+
+
 def _load_fixture_suite(suite: str, selected_names: set[str] | None = None) -> list[Fixture]:
     fixtures: list[Fixture] = []
 
@@ -229,6 +239,13 @@ def _load_existing_jsonl(path: str | None) -> tuple[set[tuple[str, int, str, int
 
 
 _STRATEGY_FN_CACHE: dict[str, StrategyFns] = {}
+
+
+def _invalidate_strategy_module(module_name: str) -> None:
+    """Force a strategy module to be re-imported on the next load."""
+    _STRATEGY_FN_CACHE.pop(module_name, None)
+    if module_name in sys.modules:
+        del sys.modules[module_name]
 
 
 def _load_strategy_fns(module_name: str) -> StrategyFns:
@@ -375,6 +392,9 @@ def _bootstrap_mean_ci(
     """Return percentile CI for the mean."""
     if not values:
         return 0.0, 0.0
+    mean = sum(values) / len(values)
+    if n_bootstrap <= 0:
+        return mean, mean
     if len(values) == 1:
         return values[0], values[0]
     rng = random.Random(seed)
@@ -393,8 +413,10 @@ def _paired_permutation_test(
     deltas: list[float],
     n_permutations: int = DEFAULT_AB_PERMUTATIONS,
     seed: int = 0,
-) -> float:
+) -> float | None:
     """Two-sided paired sign-flip permutation test p-value for mean delta."""
+    if n_permutations <= 0:
+        return None
     if not deltas:
         return 1.0
     obs = abs(sum(deltas) / len(deltas))
@@ -409,6 +431,12 @@ def _paired_permutation_test(
         if abs(s / len(deltas)) >= obs:
             ge += 1
     return (ge + 1) / (n_permutations + 1)
+
+
+def _format_p_value(p_value: float | None) -> str:
+    if p_value is None:
+        return "n/a"
+    return f"{p_value:.4f}"
 
 
 def _simulate_one(
@@ -947,6 +975,19 @@ def main() -> None:
     parser.add_argument("--module", default=DEFAULT_MODULE, help=f"Strategy module to evaluate (default: {DEFAULT_MODULE})")
     parser.add_argument("--baseline-module", default=None, help="Baseline strategy module for module-vs-module comparison")
     parser.add_argument("--candidate-module", default=None, help="Candidate strategy module for module-vs-module comparison")
+    parser.add_argument(
+        "--powerup-weight-sweep",
+        default=None,
+        help=(
+            "Comma-separated POWERUP_WEIGHT_MULT values to sweep for the candidate module "
+            "(reuses one baseline run)"
+        ),
+    )
+    parser.add_argument(
+        "--powerup-weight-env",
+        default="POWERUP_WEIGHT_MULT",
+        help="Environment variable used by candidate module for power-up weight (default: POWERUP_WEIGHT_MULT)",
+    )
     parser.add_argument("--jobs", type=int, default=1, help="Parallel worker processes for simulation runs (default: 1)")
     parser.add_argument(
         "--cache-mode",
@@ -1023,12 +1064,12 @@ def main() -> None:
         parser.error("--seeds must be > 0")
     if args.progress_every <= 0:
         parser.error("--progress-every must be > 0")
-    if args.bootstraps <= 0:
-        parser.error("--bootstraps must be > 0")
+    if args.bootstraps < 0:
+        parser.error("--bootstraps must be >= 0")
     if args.checkpoint_every <= 0:
         parser.error("--checkpoint-every must be > 0")
-    if args.ab_permutations <= 0:
-        parser.error("--ab-permutations must be > 0")
+    if args.ab_permutations < 0:
+        parser.error("--ab-permutations must be >= 0")
     if args.fail_if_score_drop is not None and args.fail_if_score_drop < 0:
         parser.error("--fail-if-score-drop must be >= 0")
     if args.fail_if_think_increase is not None and args.fail_if_think_increase < 0:
@@ -1037,6 +1078,12 @@ def main() -> None:
         parser.error("--resume requires --jsonl-out")
     if args.candidate_module and args.resume:
         parser.error("--resume is not supported with --candidate-module compare mode")
+    if args.powerup_weight_sweep and args.resume:
+        parser.error("--resume is not supported with --powerup-weight-sweep")
+    if args.powerup_weight_sweep and (
+        args.fail_if_score_drop is not None or args.fail_if_think_increase is not None
+    ):
+        parser.error("guardrail flags are not supported with --powerup-weight-sweep")
     if (
         args.fail_if_score_drop is not None or args.fail_if_think_increase is not None
     ) and not (args.ab_depths or args.candidate_module):
@@ -1048,11 +1095,21 @@ def main() -> None:
         parser.error(str(e))
 
     selected_names = _parse_names(args.boards)
+    powerup_weight_mults: list[float] | None = None
+    if args.powerup_weight_sweep:
+        try:
+            powerup_weight_mults = _parse_float_list(args.powerup_weight_sweep)
+        except ValueError as e:
+            parser.error(f"--powerup-weight-sweep {e}")
 
     try:
         fixtures = _load_fixture_suite(args.suite, selected_names=selected_names)
     except ValueError as e:
         parser.error(str(e))
+
+    sweep_candidate_module = None
+    if powerup_weight_mults:
+        sweep_candidate_module = args.candidate_module or "strategy_powerup_weighted"
 
     # Validate strategy module(s) up front.
     try:
@@ -1061,6 +1118,8 @@ def main() -> None:
             _load_strategy_fns(args.baseline_module)
         if args.candidate_module:
             _load_strategy_fns(args.candidate_module)
+        if sweep_candidate_module:
+            _load_strategy_fns(sweep_candidate_module)
     except Exception as e:
         parser.error(f"failed to import strategy module(s): {e}")
 
@@ -1194,7 +1253,7 @@ def main() -> None:
         print(
             f"  mean_delta={mean_delta:+.2f} "
             f"ci95=[{ci_lo:+.2f}, {ci_hi:+.2f}] "
-            f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={p_value:.4f}"
+            f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={_format_p_value(p_value)}"
         )
         print(
             f"  guardrail_deltas: score={ab_result['mean_score_delta']:+.2f} "
@@ -1202,16 +1261,16 @@ def main() -> None:
         )
 
     module_compare_result = None
-    if args.candidate_module:
-        baseline_module = args.baseline_module or args.module
-        print(
-            f"\n[status] module compare: baseline={baseline_module} "
-            f"candidate={args.candidate_module}"
-        )
+    powerup_weight_sweep_result = None
+    baseline_module = args.baseline_module or args.module
+    base_rows = None
+    base_runs = None
+    if args.candidate_module or powerup_weight_mults:
         if baseline_module == args.module:
             base_rows = rows
             base_runs = per_runs
         else:
+            print(f"\n[status] evaluating baseline module: {baseline_module}")
             base_rows, _, base_runs, _ = evaluate_suite(
                 fixtures=fixtures,
                 depths=depths,
@@ -1229,6 +1288,136 @@ def main() -> None:
                 checkpoint_out=None,
                 checkpoint_every=args.checkpoint_every,
             )
+
+    if powerup_weight_mults:
+        assert base_rows is not None
+        assert base_runs is not None
+        sweep_module = sweep_candidate_module or "strategy_powerup_weighted"
+        print(
+            f"\n[status] powerup weight sweep: module={sweep_module} "
+            f"env={args.powerup_weight_env} values={powerup_weight_mults}"
+        )
+        print()
+        _print_summary_table(base_rows, title=f"Baseline Module Summary ({baseline_module})")
+
+        sweep_rows: list[dict] = []
+        env_prev = os.environ.get(args.powerup_weight_env)
+        try:
+            for idx, mult in enumerate(powerup_weight_mults):
+                os.environ[args.powerup_weight_env] = str(mult)
+                _invalidate_strategy_module(sweep_module)
+                _load_strategy_fns(sweep_module)
+                run_start = time.perf_counter()
+                cand_rows, _, cand_runs, _ = evaluate_suite(
+                    fixtures=fixtures,
+                    depths=depths,
+                    n_moves=args.moves,
+                    n_seeds=args.seeds,
+                    seed_start=args.seed_start,
+                    no_random=args.no_random,
+                    module_name=sweep_module,
+                    cache_mode=args.cache_mode,
+                    jobs=args.jobs,
+                    progress_every=args.progress_every,
+                    bootstrap_count=args.bootstraps,
+                    jsonl_out=None,
+                    resume=False,
+                    checkpoint_out=None,
+                    checkpoint_every=args.checkpoint_every,
+                )
+                elapsed_s = time.perf_counter() - run_start
+                deltas = _collect_paired_deltas(
+                    baseline_runs=base_runs,
+                    candidate_runs=cand_runs,
+                    fixtures=fixtures,
+                    depths=depths,
+                    metric_key=args.ab_metric,
+                )
+                score_deltas = _collect_paired_deltas(
+                    baseline_runs=base_runs,
+                    candidate_runs=cand_runs,
+                    fixtures=fixtures,
+                    depths=depths,
+                    metric_key="score",
+                )
+                think_deltas = _collect_paired_deltas(
+                    baseline_runs=base_runs,
+                    candidate_runs=cand_runs,
+                    fixtures=fixtures,
+                    depths=depths,
+                    metric_key="think_ms_mean",
+                )
+                mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+                ci_lo, ci_hi = _bootstrap_mean_ci(
+                    deltas,
+                    n_bootstrap=args.bootstraps,
+                    seed=args.seed_start + 71 + idx,
+                )
+                p_value = _paired_permutation_test(
+                    deltas,
+                    n_permutations=args.ab_permutations,
+                    seed=args.seed_start + 89 + idx,
+                )
+                win_rate = sum(1 for x in deltas if x > 0) * 100.0 / max(1, len(deltas))
+                loss_rate = sum(1 for x in deltas if x < 0) * 100.0 / max(1, len(deltas))
+                mean_score_delta = sum(score_deltas) / len(score_deltas) if score_deltas else 0.0
+                mean_think_delta = sum(think_deltas) / len(think_deltas) if think_deltas else 0.0
+                sweep_row = {
+                    "multiplier": mult,
+                    "candidate_module": sweep_module,
+                    "metric": args.ab_metric,
+                    "paired_samples": len(deltas),
+                    "mean_delta": mean_delta,
+                    "mean_delta_ci95": [ci_lo, ci_hi],
+                    "win_rate_pct": win_rate,
+                    "loss_rate_pct": loss_rate,
+                    "p_value": p_value,
+                    "permutations": args.ab_permutations,
+                    "mean_score_delta": mean_score_delta,
+                    "mean_think_ms_delta": mean_think_delta,
+                    "runtime_seconds": elapsed_s,
+                    "candidate_summary": cand_rows,
+                }
+                sweep_rows.append(sweep_row)
+                print(
+                    f"[sweep] mult={mult:g} score_delta={mean_score_delta:+.2f} "
+                    f"think_delta={mean_think_delta:+.3f} "
+                    f"win%={win_rate:.1f} loss%={loss_rate:.1f} "
+                    f"p={_format_p_value(p_value)} runtime={elapsed_s:.1f}s"
+                )
+        finally:
+            if env_prev is None:
+                os.environ.pop(args.powerup_weight_env, None)
+            else:
+                os.environ[args.powerup_weight_env] = env_prev
+            _invalidate_strategy_module(sweep_module)
+
+        print("\nPower-Up Weight Sweep Summary")
+        print("| mult | mean_score_delta | mean_think_ms_delta | win% | loss% | p_value | runtime_s |")
+        print("|---:|---:|---:|---:|---:|---:|---:|")
+        for row in sweep_rows:
+            print(
+                f"| {row['multiplier']:.3g} | {row['mean_score_delta']:+.2f} | "
+                f"{row['mean_think_ms_delta']:+.3f} | {row['win_rate_pct']:.1f} | "
+                f"{row['loss_rate_pct']:.1f} | {_format_p_value(row['p_value'])} | "
+                f"{row['runtime_seconds']:.1f} |"
+            )
+        best = max(sweep_rows, key=lambda r: r["mean_score_delta"]) if sweep_rows else None
+        powerup_weight_sweep_result = {
+            "baseline_module": baseline_module,
+            "candidate_module": sweep_module,
+            "env_var": args.powerup_weight_env,
+            "rows": sweep_rows,
+            "best_by_mean_score_delta": best,
+        }
+
+    if args.candidate_module and not powerup_weight_mults:
+        assert base_rows is not None
+        assert base_runs is not None
+        print(
+            f"\n[status] module compare: baseline={baseline_module} "
+            f"candidate={args.candidate_module}"
+        )
         cand_rows, _, cand_runs, _ = evaluate_suite(
             fixtures=fixtures,
             depths=depths,
@@ -1309,7 +1498,7 @@ def main() -> None:
         print(
             f"  mean_delta={mean_delta:+.2f} "
             f"ci95=[{ci_lo:+.2f}, {ci_hi:+.2f}] "
-            f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={p_value:.4f}"
+            f"win%={win_rate:.1f} loss%={loss_rate:.1f} p={_format_p_value(p_value)}"
         )
         print(
             f"  guardrail_deltas: score={module_compare_result['mean_score_delta']:+.2f} "
@@ -1354,6 +1543,8 @@ def main() -> None:
                 "cache_mode": args.cache_mode,
                 "baseline_module": args.baseline_module,
                 "candidate_module": args.candidate_module,
+                "powerup_weight_sweep": powerup_weight_mults,
+                "powerup_weight_env": args.powerup_weight_env,
                 "bootstraps": args.bootstraps,
                 "progress_every": args.progress_every,
                 "ab_depths": args.ab_depths,
@@ -1370,6 +1561,7 @@ def main() -> None:
             "per_group": per_group,
             "ab_result": ab_result,
             "module_compare_result": module_compare_result,
+            "powerup_weight_sweep_result": powerup_weight_sweep_result,
             "guardrail": {
                 "context": guardrail_context,
                 "failures": guardrail_failures,
