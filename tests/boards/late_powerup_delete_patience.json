@@ -1,0 +1,12 @@
+{
+  "name": "late_powerup_delete_patience",
+  "description": "Delete is available in a stable late board; tests whether the bot spends delete too early instead of preserving structure.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [0, 0, 16, 4],
+    [0, 0, 2, 4]
+  ],
+  "score": 32032,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}

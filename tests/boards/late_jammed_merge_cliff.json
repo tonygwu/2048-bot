@@ -1,0 +1,12 @@
+{
+  "name": "late_jammed_merge_cliff",
+  "description": "Jammed late board where a left merge appears strong in expectimax but often leads to a sharp short-horizon eval drop.",
+  "board": [
+    [2048, 2048, 0, 2],
+    [8, 2, 8, 0],
+    [32, 2, 0, 0],
+    [4, 0, 0, 0]
+  ],
+  "score": 40676,
+  "powers": {"undo": 0, "swap": 1, "delete": 1}
+}

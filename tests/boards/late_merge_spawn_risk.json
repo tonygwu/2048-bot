@@ -1,0 +1,12 @@
+{
+  "name": "late_merge_spawn_risk",
+  "description": "Late-game state where a 2048+2048 merge is tempting but random spawn often damages the follow-up board shape.",
+  "board": [
+    [2048, 2048, 0, 0],
+    [4, 64, 8, 2],
+    [4, 16, 32, 2],
+    [4, 8, 4, 0]
+  ],
+  "score": 52340,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

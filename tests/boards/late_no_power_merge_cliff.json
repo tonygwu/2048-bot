@@ -1,0 +1,12 @@
+{
+  "name": "late_no_power_merge_cliff",
+  "description": "Late no-power board where a high-value merge move can still create a brittle follow-up shape.",
+  "board": [
+    [2048, 2048, 2, 2],
+    [2, 64, 8, 0],
+    [16, 32, 0, 0],
+    [2, 4, 2, 0]
+  ],
+  "score": 52324,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

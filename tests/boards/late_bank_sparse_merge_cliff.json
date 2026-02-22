@@ -1,0 +1,12 @@
+{
+  "name": "late_bank_sparse_merge_cliff",
+  "description": "Sparse late board with banked power-ups; merge-focused move choices can overestimate downstream board stability.",
+  "board": [
+    [2048, 2048, 2, 0],
+    [4, 8, 4, 0],
+    [4, 0, 0, 0],
+    [0, 0, 0, 0]
+  ],
+  "score": 36120,
+  "powers": {"undo": 0, "swap": 2, "delete": 1}
+}

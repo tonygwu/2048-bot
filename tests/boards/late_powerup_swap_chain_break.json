@@ -1,0 +1,12 @@
+{
+  "name": "late_powerup_swap_chain_break",
+  "description": "Power-up late board where swap can look good in expectimax but may break high-row ordering and reduce realized board value.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [256, 16, 0, 0],
+    [8, 8, 0, 2],
+    [0, 2, 0, 0]
+  ],
+  "score": 32576,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}

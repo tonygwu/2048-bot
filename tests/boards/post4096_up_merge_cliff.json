@@ -1,0 +1,12 @@
+{
+  "name": "post4096_up_merge_cliff",
+  "description": "Post-4096 board with delete available where upward consolidation often predicts well but can collapse in the next few plies.",
+  "board": [
+    [4096, 1024, 512, 256],
+    [0, 0, 0, 256],
+    [0, 0, 4, 8],
+    [2, 0, 0, 4]
+  ],
+  "score": 61528,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}
