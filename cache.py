@@ -102,6 +102,26 @@ def _bb_max_exp_from_signed_sql(val: int) -> int:
         return 0
 
 
+def _tile_to_min_exp(tile: int) -> int:
+    """Inclusive lower bound tile -> minimum exponent."""
+    t = max(0, int(tile))
+    if t <= 1:
+        return 0
+    # ceil(log2(t)) for non-powers-of-two, exact for powers-of-two.
+    if (t & (t - 1)) == 0:
+        return t.bit_length() - 1
+    return t.bit_length()
+
+
+def _tile_to_max_exp(tile: int) -> int:
+    """Inclusive upper bound tile -> maximum exponent."""
+    t = max(0, int(tile))
+    if t <= 1:
+        return 0
+    # floor(log2(t)) for non-powers-of-two, exact for powers-of-two.
+    return t.bit_length() - 1
+
+
 # ── DB init ───────────────────────────────────────────────────────────────────
 
 def _set_common_pragmas(conn: sqlite3.Connection) -> None:
@@ -180,6 +200,79 @@ def load_version(
             if "no such table" in str(exc).lower():
                 return {}
             raise
+        loaded = 0
+        out: dict[tuple[int, int, int], float] = {}
+        while True:
+            rows = cur.fetchmany(batch)
+            if not rows:
+                break
+            for bb, su, du, score in rows:
+                out[(_from_signed(bb), su, du)] = score
+            loaded += len(rows)
+            if progress_cb is not None:
+                try:
+                    progress_cb(loaded, total_rows)
+                except Exception:
+                    pass
+        if progress_cb is not None and loaded == 0:
+            try:
+                progress_cb(0, total_rows or 0)
+            except Exception:
+                pass
+        return out
+    finally:
+        conn.close()
+
+
+def load_version_by_max_tile_range(
+    version: str,
+    min_max_tile: int | None = None,
+    max_max_tile: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+    batch_size: int = 200_000,
+    total_rows: int | None = None,
+) -> dict:
+    """Load cached entries for *version* filtered by board max-tile range.
+
+    Filter semantics:
+    - min_max_tile is inclusive lower bound on board max tile
+    - max_max_tile is inclusive upper bound on board max tile
+    """
+    if not os.path.exists(DB_PATH):
+        return {}
+    batch = max(1, int(batch_size))
+    conn = _connect_ro()
+    try:
+        _set_common_pragmas(conn)
+        conn.create_function("bb_max_exp", 1, _bb_max_exp_from_signed_sql)
+
+        where = ["version = ?"]
+        params: list = [version]
+        if min_max_tile is not None:
+            where.append("bb_max_exp(board_bb) >= ?")
+            params.append(_tile_to_min_exp(min_max_tile))
+        if max_max_tile is not None:
+            where.append("bb_max_exp(board_bb) <= ?")
+            params.append(_tile_to_max_exp(max_max_tile))
+        where_sql = " AND ".join(where)
+
+        try:
+            if total_rows is None:
+                total_rows = conn.execute(
+                    f"SELECT COUNT(*) FROM entries WHERE {where_sql}",
+                    tuple(params),
+                ).fetchone()[0]
+            cur = conn.execute(
+                "SELECT board_bb, swap_uses, delete_uses, score "
+                f"FROM entries WHERE {where_sql} "
+                "ORDER BY board_bb, swap_uses, delete_uses",
+                tuple(params),
+            )
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
+
         loaded = 0
         out: dict[tuple[int, int, int], float] = {}
         while True:

@@ -47,6 +47,41 @@ def reset_trans_cache() -> None:
     _TRANS_CACHE.reset_stats()
 
 
+def get_trans_table_size() -> int:
+    """Return current in-memory transposition table size."""
+    return len(_TRANS_CACHE.table)
+
+
+def _max_exp_from_bb(bb: int) -> int:
+    """Return max tile exponent (0 for empty) from packed board bitboard."""
+    v = int(bb)
+    out = 0
+    for _ in range(16):
+        nib = v & 0xF
+        if nib > out:
+            out = nib
+        v >>= 4
+    return out
+
+
+def evict_trans_below_max_tile(min_tile: int) -> int:
+    """Evict cached entries whose board max tile is strictly below min_tile.
+
+    Returns number of evicted entries.
+    """
+    threshold = max(0, int(min_tile))
+    if threshold <= 1:
+        return 0
+    min_exp = threshold.bit_length() - 1
+    drop_keys = [k for k in _TRANS_CACHE.table.keys() if _max_exp_from_bb(k[0]) < min_exp]
+    for key in drop_keys:
+        _TRANS_CACHE.table.pop(key, None)
+        _TRANS_CACHE.new_entries.pop(key, None)
+    if len(_TRANS_CACHE.table) <= _TRANS_CACHE.cap:
+        _TRANS_CACHE.keep_oversized_preload = False
+    return len(drop_keys)
+
+
 def _clamp_uses(value: int) -> int:
     """Power-up uses are capped by game design to [0, 2]."""
     return max(0, min(2, int(value)))

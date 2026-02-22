@@ -12,6 +12,7 @@ Usage:
 
 import asyncio
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 import datetime as dt
 import json
 import os
@@ -40,6 +41,8 @@ from strategy import (
     SCORE_BOARD_VERSION,
     load_trans_table,
     drain_new_entries,
+    evict_trans_below_max_tile,
+    get_trans_table_size,
     get_trans_stats,
     get_search_trans_stats,
     reset_search_trans_stats,
@@ -50,6 +53,7 @@ from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
 TARGET_TILE = 16384   # stop once this tile is reached
 PROFILE_LOG_DIR = Path(".bot_logs")
+INITIAL_CACHE_MAX_TILE_EXCLUSIVE = 1024
 
 
 def _utc_now_iso() -> str:
@@ -148,7 +152,191 @@ def _cache_bucket_label(key: int) -> str:
     return f"{key}-{(key * 2) - 1}"
 
 
-async def play_one_game(page, depth_arg, game_num: int, profiler: ProfileLogger | None = None) -> dict:
+class TieredCacheLoader:
+    """Progressively load transposition cache tiers from SQLite in background."""
+
+    def __init__(self, version: str, profiler: ProfileLogger | None = None) -> None:
+        self.version = version
+        self.profiler = profiler
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trans-cache-loader")
+        self._future: Future[dict[str, Any]] | None = None
+        self._loading_threshold: int | None = None
+        self._queued_threshold: int | None = None
+        self._active_floor: int = 0  # currently evicted below this max-tile floor
+
+    def _print_initial_progress(self, loaded: int, total: int) -> None:
+        if total > 0:
+            width = 34
+            ratio = min(1.0, loaded / total)
+            filled = int(width * ratio)
+            bar = "#" * filled + "-" * (width - filled)
+            print(
+                f"\rLoading cache tier (<{INITIAL_CACHE_MAX_TILE_EXCLUSIVE}): "
+                f"[{bar}] {loaded:,}/{total:,} ({ratio*100:5.1f}%)",
+                end="",
+                flush=True,
+            )
+        else:
+            print(
+                f"\rLoading cache tier (<{INITIAL_CACHE_MAX_TILE_EXCLUSIVE}): {loaded:,} rows",
+                end="",
+                flush=True,
+            )
+
+    def initial_load(self) -> int:
+        """Synchronously preload the low-tile tier used at game start."""
+        print(f"Preloading cache tier: max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE}")
+        t0 = time.perf_counter()
+        entries = db.load_version_by_max_tile_range(
+            self.version,
+            max_max_tile=INITIAL_CACHE_MAX_TILE_EXCLUSIVE // 2,
+            progress_cb=self._print_initial_progress,
+        )
+        print()
+        if entries:
+            load_trans_table(entries)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        print(
+            f"Loaded {len(entries):,} cached entries for max_tile < "
+            f"{INITIAL_CACHE_MAX_TILE_EXCLUSIVE} in {elapsed_ms:.0f}ms"
+        )
+        if self.profiler is not None:
+            self.profiler.emit(
+                "cache_tier_initial_load",
+                version=self.version,
+                max_tile_lt=INITIAL_CACHE_MAX_TILE_EXCLUSIVE,
+                loaded_rows=len(entries),
+                elapsed_ms=round(elapsed_ms, 3),
+                trans_table_size=get_trans_table_size(),
+                maxrss_raw=_maxrss_raw(),
+            )
+        return len(entries)
+
+    def _normalize_threshold(self, max_tile: int) -> int | None:
+        mt = max(0, int(max_tile))
+        if mt < INITIAL_CACHE_MAX_TILE_EXCLUSIVE:
+            return None
+        return 1 << (mt.bit_length() - 1)
+
+    def _load_tier_range_job(self, threshold: int) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        entries = db.load_version_by_max_tile_range(
+            self.version,
+            min_max_tile=threshold,
+            max_max_tile=threshold * 2,
+        )
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return {
+            "threshold": threshold,
+            "entries": entries,
+            "elapsed_ms": elapsed_ms,
+        }
+
+    def _start_load(self, threshold: int) -> None:
+        self._loading_threshold = threshold
+        self._future = self._executor.submit(self._load_tier_range_job, threshold)
+        print(
+            f"\n[cache] queued background tier load for max_tile "
+            f"{threshold:,}..{threshold * 2:,}"
+        )
+        if self.profiler is not None:
+            self.profiler.emit(
+                "cache_tier_queued",
+                version=self.version,
+                threshold=threshold,
+                max_tile_min=threshold,
+                max_tile_max=threshold * 2,
+                maxrss_raw=_maxrss_raw(),
+            )
+
+    def _apply_completed_load_if_ready(self) -> None:
+        if self._future is None or not self._future.done():
+            return
+
+        fut = self._future
+        threshold = self._loading_threshold
+        self._future = None
+        self._loading_threshold = None
+
+        if threshold is None:
+            return
+
+        try:
+            payload = fut.result()
+        except Exception as exc:
+            print(f"\n[cache] tier load failed at {threshold:,}: {type(exc).__name__}: {exc}")
+            if self.profiler is not None:
+                self.profiler.emit(
+                    "cache_tier_error",
+                    version=self.version,
+                    threshold=threshold,
+                    error={"type": type(exc).__name__, "message": str(exc)},
+                    maxrss_raw=_maxrss_raw(),
+                )
+            payload = {"threshold": threshold, "entries": {}, "elapsed_ms": 0.0}
+
+        entries = payload.get("entries", {})
+        elapsed_ms = float(payload.get("elapsed_ms", 0.0))
+        if entries:
+            load_trans_table(entries)
+        evicted = 0
+        if threshold > self._active_floor:
+            evicted = evict_trans_below_max_tile(threshold)
+            self._active_floor = threshold
+
+        print(
+            f"\n[cache] applied tier {threshold:,}..{threshold * 2:,}: "
+            f"loaded={len(entries):,} evicted={evicted:,} "
+            f"table_size={get_trans_table_size():,} ({elapsed_ms:.0f}ms)"
+        )
+        if self.profiler is not None:
+            self.profiler.emit(
+                "cache_tier_applied",
+                version=self.version,
+                threshold=threshold,
+                max_tile_min=threshold,
+                max_tile_max=threshold * 2,
+                loaded_rows=len(entries),
+                evicted_rows=evicted,
+                elapsed_ms=round(elapsed_ms, 3),
+                trans_table_size=get_trans_table_size(),
+                maxrss_raw=_maxrss_raw(),
+            )
+
+        if self._queued_threshold is not None and self._queued_threshold > self._active_floor:
+            next_threshold = self._queued_threshold
+            self._queued_threshold = None
+            self._start_load(next_threshold)
+        else:
+            self._queued_threshold = None
+
+    def maybe_progress(self, max_tile: int) -> None:
+        """Poll completed background loads and enqueue next tier if needed."""
+        self._apply_completed_load_if_ready()
+        threshold = self._normalize_threshold(max_tile)
+        if threshold is None or threshold <= self._active_floor:
+            return
+        if self._future is not None:
+            if self._loading_threshold is not None and threshold > self._loading_threshold:
+                if self._queued_threshold is None or threshold > self._queued_threshold:
+                    self._queued_threshold = threshold
+            return
+        self._start_load(threshold)
+
+    def close(self) -> None:
+        self._apply_completed_load_if_ready()
+        if self._future is not None and not self._future.done():
+            self._future.cancel()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+
+async def play_one_game(
+    page,
+    depth_arg,
+    game_num: int,
+    profiler: ProfileLogger | None = None,
+    cache_loader: TieredCacheLoader | None = None,
+) -> dict:
     """Play a single game to completion. Returns stats dict.
 
     depth_arg: int for fixed depth, or None for auto.
@@ -248,6 +436,8 @@ async def play_one_game(page, depth_arg, game_num: int, profiler: ProfileLogger 
             best_score_seen = state.score
 
         max_tile = max(v for row in state.board for v in row)
+        if cache_loader is not None:
+            cache_loader.maybe_progress(max_tile)
 
         # ── Goal reached ──────────────────────────────────────────────────────
         if max_tile >= TARGET_TILE:
@@ -733,7 +923,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
 
     # ── Load transposition table from DB ──────────────────────────────────────
     print(f"Cache DB path: {db.DB_PATH}")
-    version_rows = None
+    cache_loader = TieredCacheLoader(SCORE_BOARD_VERSION, profiler=profiler)
     try:
         versions = db.list_versions()
         version_rows = versions.get(SCORE_BOARD_VERSION, 0)
@@ -741,34 +931,19 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
     except Exception as e:
         print(f"Could not read cache version counts from DB: {e}")
 
-    def _print_load_progress(loaded: int, total: int) -> None:
-        if total > 0:
-            width = 34
-            ratio = min(1.0, loaded / total)
-            filled = int(width * ratio)
-            bar = "#" * filled + "-" * (width - filled)
+    try:
+        loaded_initial = cache_loader.initial_load()
+        if loaded_initial == 0:
             print(
-                f"\rLoading cache: [{bar}] {loaded:,}/{total:,} ({ratio*100:5.1f}%)",
-                end="",
-                flush=True,
+                f"No cached entries found in initial tier "
+                f"(max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE}) "
+                f"for version={SCORE_BOARD_VERSION!r}."
             )
-        else:
-            print(f"\rLoading cache: {loaded:,} rows", end="", flush=True)
-
-    t_load = time.time()
-    cached = db.load_version(
-        SCORE_BOARD_VERSION,
-        progress_cb=_print_load_progress,
-        total_rows=version_rows,
-    )
-    print()
-    if cached:
-        load_trans_table(cached)
-        print(f"Loaded {len(cached):,} cached score_board entries  "
-              f"(version={SCORE_BOARD_VERSION!r}, {(time.time()-t_load)*1000:.0f}ms)")
-    else:
-        print(f"No cached entries found for version={SCORE_BOARD_VERSION!r}  "
-              f"(run populate_cache.py --generate N to seed)")
+    except Exception as exc:
+        print(
+            f"Initial tier preload failed ({type(exc).__name__}): {exc}. "
+            "Continuing without preloaded cache."
+        )
 
     pw = None
     browser = None
@@ -781,7 +956,13 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             reset_trans_stats()
             reset_search_trans_stats()
             try:
-                stats = await play_one_game(page, depth_arg, game_num, profiler=profiler)
+                stats = await play_one_game(
+                    page,
+                    depth_arg,
+                    game_num,
+                    profiler=profiler,
+                    cache_loader=cache_loader,
+                )
             except Exception as exc:
                 print(
                     f"\nGame {game_num} aborted with exception "
@@ -828,7 +1009,6 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             # Unique additions can be lower than misses because the same missing
             # key may be evaluated more than once in a game.
             new_entries = drain_new_entries()
-            unique_additions = sum(1 for k in new_entries if k not in cached)
             pending_db_flushes.append(
                 (
                     game_num,
@@ -838,9 +1018,6 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
                     hit_rate,
                 )
             )
-            if new_entries:
-                cached.update(new_entries)   # keep local count accurate in memory
-
             stats["cache_hits"]   = ts["hits"]
             stats["cache_misses"] = ts["misses"]
             all_stats.append(stats)
@@ -931,7 +1108,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             print()
             print(
                 f"  Flushed {written:,} new entries to DB in {flush_seconds:.1f}s. "
-                f"(table_size={len(cached):,})"
+                f"(table_size={get_trans_table_size():,})"
             )
         if total_flush_rows > 0:
             print(
@@ -944,6 +1121,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             await asyncio.sleep(25)
 
     finally:
+        cache_loader.close()
         if profiler.enabled:
             try:
                 profiler.emit("run_end", maxrss_raw=_maxrss_raw())
