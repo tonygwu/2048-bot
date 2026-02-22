@@ -19,6 +19,11 @@ from game import (
     dismiss_win_overlay, new_game, print_board,
 )
 from strategy import (
+    _expectimax,
+    apply_delete,
+    apply_move,
+    apply_swap,
+    score_board,
     best_action,
     auto_depth,
     SCORE_BOARD_VERSION,
@@ -28,6 +33,7 @@ from strategy import (
     reset_trans_stats,
 )
 import cache as db
+from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
 TARGET_TILE = 16384   # stop once this tile is reached
 
@@ -93,6 +99,7 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
     prev_board = None
     stuck_count = 0
     stuck_recoveries = 0
+    blocked_action_once = None
     best_score_seen = 0
     powers_used = {"undo": 0, "swap": 0, "delete": 0}
     depth_samples: list[int] = []
@@ -236,7 +243,36 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
             print("No valid action — game over.")
             break
 
+        if blocked_action_once is not None:
+            if action == blocked_action_once:
+                blocked_direction = blocked_action_once[1] if blocked_action_once[0] == "move" else None
+                fallback = best_fallback_move(
+                    board=state.board,
+                    powers=state.powers,
+                    depth=depth,
+                    blocked_direction=blocked_direction,
+                    apply_move_fn=apply_move,
+                    score_board_fn=score_board,
+                    expectimax_fn=_expectimax,
+                )
+                if fallback is not None:
+                    print(
+                        f"\n[Move {move_count}]  Avoiding repeated action after Undo: "
+                        f"{blocked_action_once} -> {fallback}"
+                    )
+                    action = fallback
+            blocked_action_once = None
+
         action_type = action[0]
+        planned_eval = projected_action_eval(
+            state.board,
+            state.powers,
+            action,
+            score_board_fn=score_board,
+            apply_move_fn=apply_move,
+            apply_swap_fn=apply_swap,
+            apply_delete_fn=apply_delete,
+        )
 
         # ── Print status every 25 moves ───────────────────────────────────────
         if move_count % 25 == 0 and move_count != last_print:
@@ -288,6 +324,40 @@ async def play_one_game(page, depth_arg, game_num: int) -> dict:
                 pass
             await asyncio.sleep(0.15)
             continue
+
+        post_action_state = await read_state(page)
+        undo_decision = analyze_undo(
+            board_before=state.board,
+            powers_before=state.powers,
+            board_after=post_action_state.board,
+            powers_after=post_action_state.powers,
+            planned_eval=planned_eval,
+            score_board_fn=score_board,
+            apply_move_fn=apply_move,
+        )
+        if undo_decision.should_undo:
+            reasons = ",".join(undo_decision.reasons)
+            print(
+                f"\n[Move {move_count}]  *** UNDO trigger ({reasons}) *** "
+                f"drop={undo_decision.eval_drop:.1f}/{undo_decision.drop_trigger:.1f} "
+                f"gap={undo_decision.plan_gap:.1f}/{undo_decision.gap_trigger:.1f} "
+                f"pressure={undo_decision.pressure:.2f}"
+            )
+            board_after_action = [row[:] for row in post_action_state.board]
+            if post_action_state.over:
+                await execute_undo_on_gameover(page)
+            else:
+                await execute_undo(page)
+            await asyncio.sleep(0.35)
+            state_after_undo = await read_state(page)
+            if state_after_undo.board != board_after_action:
+                powers_used["undo"] += 1
+                blocked_action_once = action
+                move_count += 2  # count both the bad action and the undo
+                stuck_count = 0
+                prev_board = None
+                continue
+            print(f"[Move {move_count}]  Undo trigger fired, but undo had no effect.")
 
         # ── Stuck-board guard ─────────────────────────────────────────────────
         if state.board == prev_board and action_type == "move":
@@ -450,7 +520,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
         print(f"  Summary — {num_games} game(s)")
         print(f"{'='*60}")
         print(f"{'Game':>5}  {'Score':>7}  {'Best':>7}  {'MaxTile':>8}  "
-              f"{'Moves':>6}  {'CacheHit%':>9}  {'Depth mean/p25/p50/p75':>25}  Powers(S/D)")
+              f"{'Moves':>6}  {'CacheHit%':>9}  {'Depth mean/p25/p50/p75':>25}  Powers(U/S/D)")
         print("-" * 96)
         for s in all_stats:
             pu = s.get("powers_used", {})
@@ -466,7 +536,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int) -> None:
                 f"{s['game']:>5}  {s['score']:>7}  {s['best']:>7}  "
                 f"{s['max_tile']:>8}  {s['moves']:>6}  "
                 f"{hr:>8.1f}%  {depth_tuple:>25}  "
-                f"S={pu.get('swap',0)} D={pu.get('delete',0)}"
+                f"U={pu.get('undo',0)} S={pu.get('swap',0)} D={pu.get('delete',0)}"
             )
 
         print("\nCacheHit% by max-tile bucket:")

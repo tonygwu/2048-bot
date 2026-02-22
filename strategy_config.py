@@ -80,6 +80,23 @@ class PowerUpPolicy:
     pressure_roughness_norm_divisor: float = 36.0
     swap_margin_mult: float = 1.35
     delete_margin_mult: float = 0.9
+    # Undo triggers when post-action board quality drops sharply.
+    undo_drop_trigger: float = 280.0
+    # Also trigger when realized board quality misses planned board quality.
+    undo_plan_gap_trigger: float = 190.0
+    # Reuse the same board-pressure concept used by swap/delete spend gating.
+    undo_pressure_relief: float = 90.0
+    # Spend undo more freely when we are at full bank.
+    undo_bank_uses_threshold: int = 2
+    undo_bank_relief: float = 60.0
+    # Spend undo a bit more freely near 128+ buildup.
+    undo_prox_min_tile: int = 64
+    undo_prox_relief: float = 35.0
+    # Keep triggers bounded so we do not overfire in calm boards.
+    undo_trigger_floor: float = 70.0
+    # When measuring whether undo paid off, look ahead this many actions.
+    undo_success_horizon_actions: int = 4
+    undo_success_margin: float = 120.0
 
 
 DEFAULT_DEPTH_POLICY = DepthPolicy()

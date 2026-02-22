@@ -1,0 +1,12 @@
+{
+  "name": "undo_spawn_cliff",
+  "description": "Late board with banked Undo where a strong-looking merge can be punished by spawn placement.",
+  "board": [
+    [2048, 2048, 0, 0],
+    [4, 64, 8, 2],
+    [4, 16, 32, 2],
+    [4, 8, 4, 0]
+  ],
+  "score": 52340,
+  "powers": {"undo": 2, "swap": 0, "delete": 0}
+}

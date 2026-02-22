@@ -1,0 +1,12 @@
+{
+  "name": "undo_jammed_bank",
+  "description": "Near-full late board with two Undos banked to test cliff recovery and post-undo move diversification.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 4, 8, 4],
+    [2, 16, 2, 0]
+  ],
+  "score": 36500,
+  "powers": {"undo": 2, "swap": 1, "delete": 1}
+}

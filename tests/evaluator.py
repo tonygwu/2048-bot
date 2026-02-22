@@ -12,6 +12,8 @@ This script defines and computes the shared metrics used across experiments:
   - avg_moves      : average number of actions executed
 
 Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
+Undo diagnostics are included in run rows / traces:
+  - undo_used / undo_success% and per-event trigger details (drop vs plan-gap).
 
 By default, each invocation also writes local artifacts under `.eval_artifacts/`:
   - `summary.json`      : aggregate metrics for the run
@@ -45,6 +47,8 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
 from sim_utils import place_random_tile
+from strategy_config import DEFAULT_POWERUP_POLICY
+from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
 
 DEFAULT_MOVES = 80
@@ -524,15 +528,39 @@ def _simulate_one(
 
     moves = 0
     think_ms_total = 0.0
-    action_counts = {"move": 0, "swap": 0, "delete": 0}
+    action_counts = {"move": 0, "swap": 0, "delete": 0, "undo": 0}
     think_samples: list[float] = []
     move_trace: list[dict] = []
+    undo_events: list[dict] = []
+    blocked_action_once = None
+    next_undo_event_id = 1
     termination_reason = "move_cap"
     if cache_mode == "reset-per-run" and fns.reset_trans_cache is not None:
         fns.reset_trans_cache()
     fns.reset_trans_stats()
 
-    for _ in range(n_moves):
+    def _normalize_actions(raw: dict | None) -> dict[str, int]:
+        out = dict(raw or {})
+        for kind in ("move", "swap", "delete", "undo"):
+            out[kind] = int(out.get(kind, 0))
+        return out
+
+    def _mark_undo_outcomes(current_step: int, realized_eval: float) -> None:
+        margin = DEFAULT_POWERUP_POLICY.undo_success_margin
+        for evt in undo_events:
+            if evt["resolved"]:
+                continue
+            if current_step <= evt["deadline_step"] and realized_eval >= evt["bad_eval"] + margin:
+                evt["resolved"] = True
+                evt["success"] = True
+                evt["resolved_step"] = current_step
+                evt["success_eval"] = realized_eval
+            elif current_step >= evt["deadline_step"]:
+                evt["resolved"] = True
+                evt["success"] = False
+                evt["resolved_step"] = current_step
+
+    while moves < n_moves:
         if fns.is_game_over(board):
             termination_reason = "game_over"
             break
@@ -550,8 +578,33 @@ def _simulate_one(
             termination_reason = "no_action"
             break
 
+        if blocked_action_once is not None:
+            if action == blocked_action_once:
+                blocked_direction = blocked_action_once[1] if blocked_action_once[0] == "move" else None
+                fallback = best_fallback_move(
+                    board=board,
+                    powers=powers,
+                    depth=depth,
+                    blocked_direction=blocked_direction,
+                    apply_move_fn=fns.apply_move,
+                    score_board_fn=fns.score_board,
+                    expectimax_fn=None,
+                )
+                if fallback is not None:
+                    action = fallback
+            blocked_action_once = None
+
+        planned_eval = projected_action_eval(
+            board_before,
+            powers_before,
+            action,
+            score_board_fn=fns.score_board,
+            apply_move_fn=fns.apply_move,
+            apply_swap_fn=fns.apply_swap,
+            apply_delete_fn=fns.apply_delete,
+        )
         kind = action[0]
-        action_counts[kind] += 1
+        action_counts[kind] = action_counts.get(kind, 0) + 1
         spawn = None
 
         if kind == "move":
@@ -588,14 +641,19 @@ def _simulate_one(
             termination_reason = "unknown_action"
             break
 
+        actual_eval = fns.score_board(board, powers)
+        moves += 1
         move_trace.append(
             {
-                "step": moves + 1,
+                "step": moves,
                 "kind": kind,
                 "action": list(action),
                 "think_ms": think_ms,
                 "score_before": score_before,
                 "score_after": score,
+                "eval_before": fns.score_board(board_before, powers_before),
+                "planned_eval": planned_eval,
+                "eval_after": actual_eval,
                 "max_tile_after": max(v for row in board for v in row),
                 "powers_before": powers_before,
                 "powers_after": dict(powers),
@@ -604,12 +662,99 @@ def _simulate_one(
                 "spawn": spawn,
             }
         )
-        moves += 1
+
+        _mark_undo_outcomes(moves, actual_eval)
+
+        undo_decision = analyze_undo(
+            board_before=board_before,
+            powers_before=powers_before,
+            board_after=board,
+            powers_after=powers,
+            planned_eval=planned_eval,
+            score_board_fn=fns.score_board,
+            apply_move_fn=fns.apply_move,
+        )
+        move_trace[-1]["undo_candidate"] = {
+            "should_undo": undo_decision.should_undo,
+            "reasons": list(undo_decision.reasons),
+            "eval_drop": undo_decision.eval_drop,
+            "plan_gap": undo_decision.plan_gap,
+            "drop_trigger": undo_decision.drop_trigger,
+            "gap_trigger": undo_decision.gap_trigger,
+            "pressure": undo_decision.pressure,
+        }
+        if undo_decision.should_undo and moves < n_moves:
+            bad_board = [row[:] for row in board]
+            bad_powers = dict(powers)
+            bad_score = score
+            board = [row[:] for row in board_before]
+            score = score_before
+            powers = dict(powers_before)
+            powers["undo"] = max(0, powers.get("undo", 0) - 1)
+            blocked_action_once = action
+            action_counts["undo"] += 1
+            undo_event_id = next_undo_event_id
+            next_undo_event_id += 1
+            undo_event = {
+                "undo_event_id": undo_event_id,
+                "trigger_step": moves,
+                "undo_step": moves + 1,
+                "action_reverted": list(action),
+                "reasons": list(undo_decision.reasons),
+                "eval_drop": undo_decision.eval_drop,
+                "plan_gap": undo_decision.plan_gap,
+                "bad_eval": undo_decision.eval_after,
+                "reverted_eval": undo_decision.eval_before,
+                "immediate_recovery": undo_decision.eval_before - undo_decision.eval_after,
+                "deadline_step": moves + 1 + DEFAULT_POWERUP_POLICY.undo_success_horizon_actions,
+                "resolved": False,
+                "success": False,
+            }
+            undo_events.append(undo_event)
+
+            moves += 1
+            move_trace.append(
+                {
+                    "step": moves,
+                    "kind": "undo",
+                    "action": ["undo"],
+                    "think_ms": 0.0,
+                    "score_before": bad_score,
+                    "score_after": score,
+                    "eval_before": undo_decision.eval_after,
+                    "planned_eval": undo_decision.eval_before,
+                    "eval_after": undo_decision.eval_before,
+                    "max_tile_after": max(v for row in board for v in row),
+                    "powers_before": bad_powers,
+                    "powers_after": dict(powers),
+                    "board_before": bad_board,
+                    "board_after": [row[:] for row in board],
+                    "spawn": None,
+                    "undo_event_id": undo_event_id,
+                    "undo_from_action": list(action),
+                    "undo_trigger": {
+                        "reasons": list(undo_decision.reasons),
+                        "eval_drop": undo_decision.eval_drop,
+                        "plan_gap": undo_decision.plan_gap,
+                    },
+                }
+            )
+            continue
+
+    for evt in undo_events:
+        if not evt["resolved"]:
+            evt["resolved"] = True
+            evt["success"] = False
+            evt["resolved_step"] = moves
 
     max_tile = max(v for row in board for v in row)
     cache_stats = fns.get_trans_stats()
     cache_total = cache_stats["hits"] + cache_stats["misses"]
     cache_hit_rate = cache_stats["hits"] * 100.0 / cache_total if cache_total else 0.0
+    undo_used = action_counts.get("undo", 0)
+    undo_successes = sum(1 for evt in undo_events if evt.get("success"))
+    undo_success_rate = (undo_successes * 100.0 / undo_used) if undo_used else 0.0
+    undo_eval_recovery = [evt.get("immediate_recovery", 0.0) for evt in undo_events]
     return {
         "moves": moves,
         "score": score,
@@ -626,10 +771,17 @@ def _simulate_one(
         "cache_hits": cache_stats["hits"],
         "cache_misses": cache_stats["misses"],
         "cache_hit_rate": cache_hit_rate,
-        "actions": action_counts,
+        "actions": _normalize_actions(action_counts),
         "termination_reason": termination_reason,
         "final_board": [row[:] for row in board],
         "final_powers": dict(powers),
+        "undo_used": undo_used,
+        "undo_successes": undo_successes,
+        "undo_success_rate_pct": undo_success_rate,
+        "undo_avg_immediate_recovery": (
+            sum(undo_eval_recovery) / len(undo_eval_recovery) if undo_eval_recovery else 0.0
+        ),
+        "undo_events": undo_events,
         "trace": move_trace,
     }
 
@@ -640,11 +792,14 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
         return {}
 
     total_moves = sum(r["moves"] for r in runs)
-    total_actions = sum(r["actions"][k] for r in runs for k in ("move", "swap", "delete"))
+    total_actions = sum(r["actions"].get(k, 0) for r in runs for k in ("move", "swap", "delete", "undo"))
     think_samples = [x for r in runs for x in r.get("think_ms_samples", [])]
     total_cache_hits = sum(r.get("cache_hits", 0) for r in runs)
     total_cache_misses = sum(r.get("cache_misses", 0) for r in runs)
     total_cache = total_cache_hits + total_cache_misses
+    total_undo_used = sum(r.get("undo_used", r.get("actions", {}).get("undo", 0)) for r in runs)
+    total_undo_successes = sum(r.get("undo_successes", 0) for r in runs)
+    undo_recovery_samples = [r.get("undo_avg_immediate_recovery", 0.0) for r in runs if r.get("undo_used", 0) > 0]
 
     score_ci = _bootstrap_mean_ci([r["score"] for r in runs], n_bootstrap=bootstrap_count)
     max_ci = _bootstrap_mean_ci([r["max_tile"] for r in runs], n_bootstrap=bootstrap_count)
@@ -670,9 +825,16 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
         "avg_score_ci95": [score_ci[0], score_ci[1]],
         "avg_max_ci95": [max_ci[0], max_ci[1]],
         "avg_eval_ci95": [eval_ci[0], eval_ci[1]],
-        "move_pct": (sum(r["actions"]["move"] for r in runs) * 100.0 / max(1, total_actions)),
-        "swap_pct": (sum(r["actions"]["swap"] for r in runs) * 100.0 / max(1, total_actions)),
-        "delete_pct": (sum(r["actions"]["delete"] for r in runs) * 100.0 / max(1, total_actions)),
+        "move_pct": (sum(r["actions"].get("move", 0) for r in runs) * 100.0 / max(1, total_actions)),
+        "swap_pct": (sum(r["actions"].get("swap", 0) for r in runs) * 100.0 / max(1, total_actions)),
+        "delete_pct": (sum(r["actions"].get("delete", 0) for r in runs) * 100.0 / max(1, total_actions)),
+        "undo_pct": (sum(r["actions"].get("undo", 0) for r in runs) * 100.0 / max(1, total_actions)),
+        "undo_used": total_undo_used,
+        "undo_successes": total_undo_successes,
+        "undo_success_rate_pct": (total_undo_successes * 100.0 / total_undo_used) if total_undo_used else 0.0,
+        "undo_avg_immediate_recovery": (
+            sum(undo_recovery_samples) / len(undo_recovery_samples) if undo_recovery_samples else 0.0
+        ),
     }
 
 
@@ -794,10 +956,19 @@ def evaluate_suite(
                         "cache_hits": match.get("cache_hits", 0),
                         "cache_misses": match.get("cache_misses", 0),
                         "cache_hit_rate": match.get("cache_hit_rate", 0.0),
-                        "actions": match["actions"],
+                        "actions": {
+                            "move": int(match.get("actions", {}).get("move", 0)),
+                            "swap": int(match.get("actions", {}).get("swap", 0)),
+                            "delete": int(match.get("actions", {}).get("delete", 0)),
+                            "undo": int(match.get("actions", {}).get("undo", 0)),
+                        },
                         "termination_reason": match.get("termination_reason", "resumed"),
                         "final_board": match.get("final_board"),
                         "final_powers": match.get("final_powers"),
+                        "undo_used": int(match.get("undo_used", 0)),
+                        "undo_successes": int(match.get("undo_successes", 0)),
+                        "undo_success_rate_pct": float(match.get("undo_success_rate_pct", 0.0)),
+                        "undo_avg_immediate_recovery": float(match.get("undo_avg_immediate_recovery", 0.0)),
                     }
                     completed_units += 1
                 else:
@@ -975,6 +1146,8 @@ def _print_metric_glossary() -> None:
     print("  avg_think_ms : average best_action compute time per executed action")
     print("  think_p50/90/99_ms : percentile best_action latency per action")
     print("  cache_hit_rate% : transposition table hit rate during evaluation")
+    print("  undo_used    : total undo actions spent across runs")
+    print("  undo_success%: % of undo events that beat pre-undo bad-state eval within follow-up horizon")
 
 
 def _print_summary_table(rows: list[dict], title: str) -> None:
@@ -982,9 +1155,9 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
     print(
         "| depth | avg_score | score_ci95 | avg_max | max_ci95 | survive% | reach2048% | "
         "reach4096% | reach8192% | avg_moves | avg_eval | eval_ci95 | avg_think_ms | "
-        "think_p50 | think_p90 | think_p99 | cache_hit_rate% |"
+        "think_p50 | think_p90 | think_p99 | cache_hit_rate% | undo_used | undo_success% |"
     )
-    print("|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|")
+    print("|---:|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|")
     for r in rows:
         score_ci = f"[{r['avg_score_ci95'][0]:.1f}, {r['avg_score_ci95'][1]:.1f}]"
         max_ci = f"[{r['avg_max_ci95'][0]:.1f}, {r['avg_max_ci95'][1]:.1f}]"
@@ -994,7 +1167,8 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
             f"{r['survive_pct']:.1f} | {r['reach2048_pct']:.1f} | {r['reach4096_pct']:.1f} | "
             f"{r['reach8192_pct']:.1f} | {r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {eval_ci} | "
             f"{r['avg_think_ms']:.2f} | {r['think_p50_ms']:.2f} | {r['think_p90_ms']:.2f} | "
-            f"{r['think_p99_ms']:.2f} | {r['cache_hit_rate_pct']:.1f} |"
+            f"{r['think_p99_ms']:.2f} | {r['cache_hit_rate_pct']:.1f} | "
+            f"{r.get('undo_used', 0)} | {r.get('undo_success_rate_pct', 0.0):.1f} |"
         )
 
 
@@ -1003,17 +1177,17 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
     print(
         "| fixture | avg_score | avg_max | survive% | reach2048% | "
         "reach4096% | reach8192% | avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
-        "action_mix(move/swap/delete) |"
+        "action_mix(move/swap/delete/undo) | undo_success% |"
     )
-    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for name in sorted(stats.keys()):
         s = stats[name]
-        mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}"
+        mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}/{s.get('undo_pct',0.0):.1f}"
         print(
             f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
             f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
-            f"{s['cache_hit_rate_pct']:.1f} | {mix} |"
+            f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
         )
 
 
@@ -1022,17 +1196,17 @@ def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
     print(
         "| group | avg_score | avg_max | survive% | reach2048% | "
         "reach4096% | reach8192% | avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
-        "action_mix(move/swap/delete) |"
+        "action_mix(move/swap/delete/undo) | undo_success% |"
     )
-    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for name in sorted(stats.keys()):
         s = stats[name]
-        mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}"
+        mix = f"{s['move_pct']:.1f}/{s['swap_pct']:.1f}/{s['delete_pct']:.1f}/{s.get('undo_pct',0.0):.1f}"
         print(
             f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
             f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
-            f"{s['cache_hit_rate_pct']:.1f} | {mix} |"
+            f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
         )
 
 
