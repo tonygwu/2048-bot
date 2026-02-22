@@ -1,0 +1,12 @@
+{
+  "name": "late_powerup_bank",
+  "description": "Late-game board with both swap/delete banked at cap; tests saving vs spending in a stable 2048+ position.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 4, 2, 0],
+    [4, 2, 0, 0]
+  ],
+  "score": 32000,
+  "powers": {"undo": 0, "swap": 2, "delete": 2}
+}

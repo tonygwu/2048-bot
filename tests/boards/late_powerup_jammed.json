@@ -1,0 +1,12 @@
+{
+  "name": "late_powerup_jammed",
+  "description": "Near-full late board where tactical power-up timing matters to survive and preserve a monotone chain.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 4, 8, 4],
+    [2, 16, 2, 0]
+  ],
+  "score": 36500,
+  "powers": {"undo": 0, "swap": 1, "delete": 1}
+}

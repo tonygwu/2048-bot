@@ -1,0 +1,12 @@
+{
+  "name": "post4096_powerup_delete",
+  "description": "Post-4096 phase with delete available; evaluates whether delete is reserved for crisis cleanup.",
+  "board": [
+    [4096, 1024, 512, 256],
+    [128, 64, 32, 16],
+    [8, 4, 2, 2],
+    [4, 0, 0, 0]
+  ],
+  "score": 61000,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}

@@ -44,6 +44,12 @@ DEFAULT_BOOTSTRAPS = 400
 DEFAULT_AB_PERMUTATIONS = 2000
 DEFAULT_MODULE = "strategy"
 
+POWERUP_LATE_BOARDS = [
+    "late_powerup_bank",
+    "late_powerup_jammed",
+    "post4096_powerup_delete",
+]
+
 
 # Backwards-compatible board suite for depth tuning (folded from benchmark_depth.py).
 DEPTH_CALIBRATION_BOARDS: dict[str, dict] = {
@@ -165,6 +171,23 @@ def _load_fixture_suite(suite: str, selected_names: set[str] | None = None) -> l
                     score=int(spec.get("score", 0)),
                     powers=dict(spec.get("powers", {})),
                     description=spec.get("description", ""),
+                )
+            )
+    elif suite == "powerup_late":
+        boards_dir = Path(__file__).parent / "boards"
+        names = selected_names if selected_names else set(POWERUP_LATE_BOARDS)
+        for name in sorted(names):
+            p = boards_dir / f"{name}.json"
+            if not p.exists():
+                raise ValueError(f"Unknown powerup_late board: {name}")
+            data = json.loads(p.read_text())
+            fixtures.append(
+                Fixture(
+                    name=name,
+                    board=[row[:] for row in data["board"]],
+                    score=int(data.get("score", 0)),
+                    powers=dict(data.get("powers", {})),
+                    description=data.get("description", ""),
                 )
             )
     else:
@@ -914,10 +937,11 @@ def main() -> None:
             "  .venv/bin/python tests/evaluator.py\n"
             "  .venv/bin/python tests/evaluator.py --suite fixtures --depths 3,4,5 --seeds 30 --moves 80\n"
             "  .venv/bin/python tests/evaluator.py --suite depth_calibration --depths 2,3,4,5 --seeds 5 --moves 25\n"
+            "  .venv/bin/python tests/evaluator.py --suite powerup_late --depths 6,7 --seeds 12 --moves 80\n"
             "  .venv/bin/python tests/evaluator.py --suite fixtures --boards late_game,jammed --depths 4 --per-fixture\n"
         ),
     )
-    parser.add_argument("--suite", choices=["fixtures", "depth_calibration"], default="fixtures")
+    parser.add_argument("--suite", choices=["fixtures", "depth_calibration", "powerup_late"], default="fixtures")
     parser.add_argument("--boards", default=None, help="Comma-separated fixture names to include (default: all)")
     parser.add_argument("--depths", default=",".join(str(d) for d in DEFAULT_DEPTHS))
     parser.add_argument("--module", default=DEFAULT_MODULE, help=f"Strategy module to evaluate (default: {DEFAULT_MODULE})")
