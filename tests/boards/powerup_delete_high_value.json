@@ -1,0 +1,12 @@
+{
+  "name": "powerup_delete_high_value",
+  "description": "Cramped late board where deleting mid/high clutter (not just 2/4/8) can unlock tactical space.",
+  "board": [
+    [2048, 512, 0, 8],
+    [4096, 256, 64, 32],
+    [256, 512, 128, 512],
+    [2, 128, 32, 64]
+  ],
+  "score": 70000,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}

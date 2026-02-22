@@ -54,6 +54,8 @@ class EvalWeights:
     mobility: float = 95.0
     corner: float = 80.0
     powerup: float = 1.0
+    promotion: float = 350.0
+    high_merge: float = 180.0
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 """Search policy and action selection."""
 
 import math
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 
 from strategy_actions import (
     Action,
@@ -11,15 +11,15 @@ from strategy_actions import (
     SwapAction,
     action_to_tuple,
 )
-from strategy_config import DEFAULT_DEPTH_POLICY
-from strategy_config import DEFAULT_POWERUP_POLICY
-from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells
+from strategy_config import DEFAULT_DEPTH_POLICY, DEFAULT_POWERUP_POLICY
+from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells, is_game_over
 from strategy_eval import _roughness, normalize_powers, score_board
 
 _SEARCH_CACHE_CAP = 250_000
 _SEARCH_CACHE: OrderedDict = OrderedDict()
 _SEARCH_CACHE_HITS = 0
 _SEARCH_CACHE_MISSES = 0
+_TERMINAL_LOSS_PENALTY = 25_000.0
 
 
 def reset_search_trans_cache() -> None:
@@ -125,6 +125,8 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
 
     if depth == 0:
         out = score_board(board, powers)
+        if is_game_over(board):
+            out -= _TERMINAL_LOSS_PENALTY
         _search_cache_store(key, out)
         return out
 
@@ -139,13 +141,18 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
             val = _expectimax(nb, depth - 1, False, powers)
             if val > best:
                 best = val
-        out = best if any_valid else score_board(board, powers)
+        if any_valid:
+            out = best
+        else:
+            out = score_board(board, powers) - _TERMINAL_LOSS_PENALTY
         _search_cache_store(key, out)
         return out
 
     empties = empty_cells(board)
     if not empties:
         out = score_board(board, powers)
+        if is_game_over(board):
+            out -= _TERMINAL_LOSS_PENALTY
         _search_cache_store(key, out)
         return out
     sample = empties if len(empties) <= 6 else empties[::len(empties) // 6 + 1][:6]
@@ -175,6 +182,31 @@ def apply_delete(board: list[list[int]], value: int) -> list[list[int]]:
 def _top_positions(board: list[list[int]], k: int = 6) -> list[tuple[int, int]]:
     tiles = sorted(((board[r][c], r, c) for r in range(4) for c in range(4) if board[r][c] > 0), reverse=True)
     return [(r, c) for _, r, c in tiles[:k]]
+
+
+def _delete_candidates(board: list[list[int]], empties: int, max_tile: int) -> list[int]:
+    counts = Counter(board[r][c] for r in range(4) for c in range(4) if board[r][c] > 0)
+    candidates: list[int] = [2, 4, 8]
+    if empties <= 4:
+        candidates += [16, 32]
+    if max_tile >= 2048 and empties <= 5:
+        candidates += [64]
+    if max_tile >= 4096 and empties <= 4:
+        candidates += [128]
+
+    # Add duplicated values that are "small enough" relative to late-board scale.
+    late_cap = max(64, max_tile // 4) if max_tile > 0 else 64
+    dup_values = sorted(v for v, cnt in counts.items() if cnt >= 2 and v <= late_cap)
+    candidates.extend(dup_values)
+
+    out: list[int] = []
+    seen: set[int] = set()
+    for v in candidates:
+        if v not in counts or v in seen:
+            continue
+        seen.add(v)
+        out.append(v)
+    return out
 
 
 def _legal_move_count(board: list[list[int]]) -> int:
@@ -222,6 +254,8 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
     best_swap_act: SwapAction | None = None
     best_delete_val = float("-inf")
     best_delete_act: DeleteAction | None = None
+    empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
+    max_tile = max(board[r][c] for r in range(4) for c in range(4))
 
     for d in DIRECTIONS:
         nb, score_delta, changed = apply_move(board, d)
@@ -234,7 +268,8 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
 
     if powers["swap"] > 0:
         powers_after = {**powers, "swap": powers["swap"] - 1}
-        top = _top_positions(board, k=6)
+        swap_k = 8 if empties <= 4 or max_tile >= 4096 else 6
+        top = _top_positions(board, k=swap_k)
         for i in range(len(top)):
             for j in range(i + 1, len(top)):
                 r1, c1 = top[i]
@@ -249,14 +284,7 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
 
     if powers["delete"] > 0:
         powers_after = {**powers, "delete": powers["delete"] - 1}
-        empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
-        candidates = [2, 4, 8]
-        if empties <= 3:
-            candidates += [16, 32]
-        present = {board[r][c] for r in range(4) for c in range(4) if board[r][c] > 0}
-        for v in candidates:
-            if v not in present:
-                continue
+        for v in _delete_candidates(board, empties=empties, max_tile=max_tile):
             nb = apply_delete(board, v)
             val = _expectimax(nb, depth - 1, False, powers_after)
             if val > best_delete_val:

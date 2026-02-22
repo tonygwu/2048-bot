@@ -13,7 +13,7 @@ from transposition_cache import TranspositionCache
 
 # Bump this string whenever heuristic weights or eval logic changes.
 # The SQLite cache stores scores per-version; stale entries are ignored.
-SCORE_BOARD_VERSION = "1.1"
+SCORE_BOARD_VERSION = "1.3"
 
 _TRANS_CAP = 500_000
 _TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
@@ -85,6 +85,8 @@ class EvalFeatures:
     legal_moves: int
     corner_max_log: float
     powerup_value: float
+    promotion_progress: float
+    high_merge_potential: float
 
 
 def _gradient(board: list[list[int]]) -> float:
@@ -163,6 +165,28 @@ def _merge_potential(board: list[list[int]]) -> float:
     return s
 
 
+def _high_merge_potential(board: list[list[int]], max_val: int) -> float:
+    if max_val < 2048:
+        return 0.0
+    threshold = max(128, max_val // 8)
+    s = 0.0
+    for r in range(4):
+        for c in range(4):
+            v = board[r][c]
+            if v < threshold:
+                continue
+            lv = math.log2(v)
+            if c + 1 < 4 and board[r][c + 1] == v:
+                s += lv
+            if r + 1 < 4 and board[r + 1][c] == v:
+                s += lv
+            if c + 2 < 4 and board[r][c + 2] == v and board[r][c + 1] == 0:
+                s += 0.5 * lv
+            if r + 2 < 4 and board[r + 2][c] == v and board[r + 1][c] == 0:
+                s += 0.5 * lv
+    return s
+
+
 def _legal_move_count(board: list[list[int]]) -> int:
     count = 0
     for d in DIRECTIONS:
@@ -205,9 +229,15 @@ def _powerup_value(max_tile: int, powers: dict) -> float:
 def extract_eval_features(board: list[list[int]], powers: dict | None = None) -> EvalFeatures:
     powers = normalize_powers(powers)
     empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
-    max_val = max(board[r][c] for r in range(4) for c in range(4))
+    tiles = sorted((board[r][c] for r in range(4) for c in range(4)), reverse=True)
+    max_val = tiles[0] if tiles else 0
+    second_val = tiles[1] if len(tiles) > 1 else 0
     tile_sum = sum(board[r][c] for r in range(4) for c in range(4))
     max_log = math.log2(max_val) if max_val > 0 else 0.0
+    second_log = math.log2(second_val) if second_val > 0 else 0.0
+    # Late-game promotion pressure: encourage building up the next-largest tile
+    # once we've already reached 2048+.
+    promotion_progress = second_log if max_log >= 11.0 else 0.0
     corner_max_log = max_log if max_val > 0 and board[0][0] == max_val else 0.0
     return EvalFeatures(
         empties=empties,
@@ -220,6 +250,8 @@ def extract_eval_features(board: list[list[int]], powers: dict | None = None) ->
         legal_moves=_legal_move_count(board),
         corner_max_log=corner_max_log,
         powerup_value=_powerup_value(max_val, powers),
+        promotion_progress=promotion_progress,
+        high_merge_potential=_high_merge_potential(board, max_val),
     )
 
 
@@ -235,6 +267,8 @@ def score_from_features(features: EvalFeatures, weights: EvalWeights = DEFAULT_E
         + weights.mobility * features.legal_moves
         + weights.corner * features.corner_max_log
         + weights.powerup * features.powerup_value
+        + weights.promotion * features.promotion_progress
+        + weights.high_merge * features.high_merge_potential
     )
 
 

@@ -47,6 +47,8 @@ class TestStrategyEval(unittest.TestCase):
             mobility=0.0,
             corner=0.0,
             powerup=0.0,
+            promotion=0.0,
+            high_merge=0.0,
         )
         self.assertEqual(score_from_features(features, zero), 0.0)
 

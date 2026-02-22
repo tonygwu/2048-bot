@@ -1,0 +1,12 @@
+{
+  "name": "promotion_8192_pipeline",
+  "description": "Post-8192 sparse board that often plateaus. Tests whether policy can build a second high tile instead of stalling at 8192.",
+  "board": [
+    [8192, 1024, 512, 0],
+    [256, 128, 64, 0],
+    [32, 16, 8, 0],
+    [4, 2, 0, 0]
+  ],
+  "score": 126050,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "late_terminal_trap",
+  "description": "Late-game one-empty trap: only specific continuations preserve mobility after spawn. Tests near-terminal safety handling.",
+  "board": [
+    [2048, 1024, 512, 256],
+    [64, 128, 64, 32],
+    [16, 32, 16, 4],
+    [0, 2, 8, 4]
+  ],
+  "score": 48216,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}
