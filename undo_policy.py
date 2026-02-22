@@ -171,6 +171,7 @@ def analyze_undo(
     """Evaluate whether Undo should be spent after a move resolved."""
     powers_before_n = normalize_powers(powers_before)
     powers_after_n = normalize_powers(powers_after)
+    earned_undo_this_action = powers_after_n.get("undo", 0) > powers_before_n.get("undo", 0)
     eval_before = float(score_board_fn(board_before, powers_before_n))
     eval_after = float(score_board_fn(board_after, powers_after_n))
     planned = eval_before if planned_eval is None else float(planned_eval)
@@ -204,7 +205,11 @@ def analyze_undo(
     plan_gap_triggered = plan_gap >= gap_trigger and plan_gap_ratio >= policy.undo_plan_gap_ratio_trigger
     if plan_gap_triggered:
         realized_gain = eval_after - eval_before
-        if eval_drop_triggered or realized_gain <= policy.undo_plan_gap_gain_tolerance:
+        # Avoid burning a freshly-unlocked Undo on the same move purely from
+        # plan-gap noise; require a true eval-drop trigger in that case.
+        if earned_undo_this_action and not eval_drop_triggered:
+            pass
+        elif eval_drop_triggered or realized_gain <= policy.undo_plan_gap_gain_tolerance:
             reasons.append("plan_gap")
 
     should_undo = powers_after_n.get("undo", 0) > 0 and bool(reasons)

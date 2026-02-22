@@ -68,6 +68,52 @@ class TestUndoPolicy(unittest.TestCase):
         self.assertTrue(decision.should_undo)
         self.assertEqual(decision.reasons, ("plan_gap",))
 
+    def test_plan_gap_only_undo_is_suppressed_when_undo_was_just_unlocked(self) -> None:
+        board_before = _load_board("mid_game")
+        board_after = _load_board("corner_trap")
+        mapping = {
+            _key(board_before): 5000.0,
+            _key(board_after): 4970.0,
+        }
+
+        def score_fn(board, _powers):
+            return mapping[_key(board)]
+
+        decision = analyze_undo(
+            board_before=board_before,
+            powers_before={"undo": 0, "swap": 0, "delete": 0},
+            board_after=board_after,
+            powers_after={"undo": 1, "swap": 0, "delete": 0},
+            planned_eval=5400.0,
+            score_board_fn=score_fn,
+            apply_move_fn=apply_move,
+        )
+        self.assertFalse(decision.should_undo)
+        self.assertEqual(decision.reasons, ())
+
+    def test_eval_drop_still_triggers_when_undo_was_just_unlocked(self) -> None:
+        board_before = _load_board("mid_game")
+        board_after = _load_board("corner_trap")
+        mapping = {
+            _key(board_before): 5000.0,
+            _key(board_after): 4200.0,
+        }
+
+        def score_fn(board, _powers):
+            return mapping[_key(board)]
+
+        decision = analyze_undo(
+            board_before=board_before,
+            powers_before={"undo": 0, "swap": 0, "delete": 0},
+            board_after=board_after,
+            powers_after={"undo": 1, "swap": 0, "delete": 0},
+            planned_eval=5200.0,
+            score_board_fn=score_fn,
+            apply_move_fn=apply_move,
+        )
+        self.assertTrue(decision.should_undo)
+        self.assertIn("eval_drop", decision.reasons)
+
     def test_plan_gap_only_undo_is_suppressed_when_eval_improved(self) -> None:
         board_before = _load_board("mid_game")
         board_after = _load_board("corner_trap")

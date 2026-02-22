@@ -564,6 +564,11 @@ async def play_one_game(page, depth_arg, game_num: int, profiler: ProfileLogger 
                 await execute_undo(page)
             await asyncio.sleep(0.35)
             state_after_undo = await read_state(page)
+            if state_after_undo.board == board_after_action:
+                # Mirror game-over undo recovery behavior: one extra settle/read
+                # avoids treating a delayed worker update as "no effect".
+                await asyncio.sleep(0.25)
+                state_after_undo = await read_state(page)
             if state_after_undo.board != board_after_action:
                 powers_used["undo"] += 1
                 blocked_action_once = action
