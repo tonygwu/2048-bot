@@ -6,11 +6,11 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class DepthPolicy:
     min_depth: int = 5
-    max_depth: int = 8
-    soft_max: int = 8
+    max_depth: int = 7
+    soft_max: int = 7
     # Slight upward bias toward deeper search in open/mid-game.
     base: float = 1.45
-    w_max: float = 0.30
+    w_max: float = 0.25
     w_full: float = 1.10
     w_blocked: float = 0.75
     w_rough: float = 0.45
@@ -36,7 +36,7 @@ class DepthPolicy:
     tight_valid_threshold: int = 3
     tight_bonus: float = 0.50
     near_death_empties_threshold: int = 1
-    # Depth-6 should remain rare, but allow two-move late-game traps.
+    # Depth-7 is now the hard ceiling; keep it reserved for true crises.
     near_death_valid_threshold: int = 2
     near_death_rough_threshold: float = 0.95
     near_death_max_log_threshold: float = 11.0
