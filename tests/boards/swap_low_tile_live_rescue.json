@@ -1,0 +1,12 @@
+{
+  "name": "swap_low_tile_live_rescue",
+  "description": "Legal-move board where best swap should move a stranded 1024 into a high-value snake slot by swapping with a 2.",
+  "board": [
+    [4, 512, 2, 16],
+    [2, 128, 128, 128],
+    [1024, 64, 8, 2],
+    [128, 0, 64, 64]
+  ],
+  "score": 28900,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}

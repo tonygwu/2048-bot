@@ -80,6 +80,10 @@ class PowerUpPolicy:
     pressure_roughness_norm_divisor: float = 36.0
     swap_margin_mult: float = 1.35
     delete_margin_mult: float = 0.9
+    # Swap search now scores all distinct non-empty tile pairs with the static
+    # evaluator, then runs expectimax on a pressure-adaptive top-N shortlist.
+    swap_pair_cap_calm: int = 20
+    swap_pair_cap_pressure: int = 36
     # Undo triggers when post-action board quality drops sharply.
     undo_drop_trigger: float = 280.0
     # Also trigger when realized board quality misses planned board quality.

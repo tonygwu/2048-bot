@@ -1,0 +1,12 @@
+{
+  "name": "swap_low_tile_rescue",
+  "description": "No-move board where best swap lifts a low tile blocker from a high-snake slot by swapping with a 1024 tile.",
+  "board": [
+    [256, 4, 1024, 128],
+    [64, 1024, 16, 32],
+    [8, 16, 8, 2],
+    [1024, 2048, 32, 256]
+  ],
+  "score": 42100,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}

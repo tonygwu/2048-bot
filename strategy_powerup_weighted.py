@@ -237,9 +237,31 @@ def apply_delete(board: list[list[int]], value: int) -> list[list[int]]:
     return [[0 if v == value else v for v in row] for row in board]
 
 
-def _top_positions(board: list[list[int]], k: int = 6) -> list[tuple[int, int]]:
-    tiles = sorted(((board[r][c], r, c) for r in range(4) for c in range(4) if board[r][c] > 0), reverse=True)
-    return [(r, c) for _, r, c in tiles[:k]]
+def _swap_candidate_pairs(board: list[list[int]], powers_after: dict) -> list[tuple[int, int, int, int]]:
+    """Return a pressure-bounded shortlist of swap pairs."""
+    positions = [(r, c) for r in range(4) for c in range(4) if board[r][c] > 0]
+    if len(positions) < 2:
+        return []
+
+    scored_pairs: list[tuple[float, tuple[int, int, int, int]]] = []
+    for i in range(len(positions)):
+        r1, c1 = positions[i]
+        for j in range(i + 1, len(positions)):
+            r2, c2 = positions[j]
+            if board[r1][c1] == board[r2][c2]:
+                continue
+            nb = apply_swap(board, r1, c1, r2, c2)
+            scored_pairs.append((score_board(nb, powers_after), (r1, c1, r2, c2)))
+
+    if not scored_pairs:
+        return []
+
+    p = DEFAULT_POWERUP_POLICY
+    pressure = _board_pressure(board)
+    cap = int(round(p.swap_pair_cap_calm * (1.0 - pressure) + p.swap_pair_cap_pressure * pressure))
+    cap = max(1, min(len(scored_pairs), cap))
+    scored_pairs.sort(key=lambda item: item[0], reverse=True)
+    return [pair for _, pair in scored_pairs[:cap]]
 
 
 def _legal_move_count(board: list[list[int]]) -> int:
@@ -299,18 +321,12 @@ def best_action_obj(board: list[list[int]], powers: dict | None = None, depth: i
 
     if powers["swap"] > 0:
         powers_after = {**powers, "swap": powers["swap"] - 1}
-        top = _top_positions(board, k=6)
-        for i in range(len(top)):
-            for j in range(i + 1, len(top)):
-                r1, c1 = top[i]
-                r2, c2 = top[j]
-                if board[r1][c1] == board[r2][c2]:
-                    continue
-                nb = apply_swap(board, r1, c1, r2, c2)
-                val = _expectimax(nb, depth - 1, False, powers_after)
-                if val > best_swap_val:
-                    best_swap_val = val
-                    best_swap_act = SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
+        for r1, c1, r2, c2 in _swap_candidate_pairs(board, powers_after):
+            nb = apply_swap(board, r1, c1, r2, c2)
+            val = _expectimax(nb, depth - 1, False, powers_after)
+            if val > best_swap_val:
+                best_swap_val = val
+                best_swap_act = SwapAction(r1=r1, c1=c1, r2=r2, c2=c2)
 
     if powers["delete"] > 0:
         powers_after = {**powers, "delete": powers["delete"] - 1}
