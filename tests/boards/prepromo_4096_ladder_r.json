@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_4096_ladder_r",
+  "description": "4096 anchor with a clean 512 ladder and open tail; intended to test stepwise runner-up promotion into 1024/2048.",
+  "board": [
+    [4096, 512, 256, 128],
+    [ 512, 256, 128,  64],
+    [ 256, 128,  64,  32],
+    [   0,   0,   0,   0]
+  ],
+  "score": 62300,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

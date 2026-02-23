@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_4096_weave_v",
+  "description": "Weave-shaped 4096 board with multiple 512 feeders and sparse exits; tests merge sequencing quality for high-tile promotions.",
+  "board": [
+    [4096, 256, 512, 128],
+    [ 512, 128, 256,  64],
+    [ 256,  64, 512,  32],
+    [   0,   0,   0,   0]
+  ],
+  "score": 62380,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}

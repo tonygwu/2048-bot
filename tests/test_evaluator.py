@@ -33,6 +33,13 @@ class TestEvaluatorHelpers(unittest.TestCase):
         initial_second_max_tile: int,
         second_max_tile: int,
         peak_second_max_tile: int | None = None,
+        time_to_promote_1024: int | None = None,
+        time_to_promote_2048: int | None = None,
+        time_to_promote_4096: int | None = None,
+        tile_count_ge1024_end: int = 0,
+        tile_count_ge2048_end: int = 0,
+        tile_count_ge4096_end: int = 0,
+        merge_ready_value_end: float = 0.0,
     ) -> dict:
         peak = second_max_tile if peak_second_max_tile is None else peak_second_max_tile
         second_gain = second_max_tile - initial_second_max_tile
@@ -64,6 +71,13 @@ class TestEvaluatorHelpers(unittest.TestCase):
             "second_ge8192": second_max_tile >= 8192,
             "peak_second_ge4096": peak >= 4096,
             "peak_second_ge8192": peak >= 8192,
+            "time_to_promote_1024": time_to_promote_1024,
+            "time_to_promote_2048": time_to_promote_2048,
+            "time_to_promote_4096": time_to_promote_4096,
+            "tile_count_ge1024_end": tile_count_ge1024_end,
+            "tile_count_ge2048_end": tile_count_ge2048_end,
+            "tile_count_ge4096_end": tile_count_ge4096_end,
+            "merge_ready_value_end": merge_ready_value_end,
             "survived_to_cap": True,
             "final_eval": 123.0,
             "think_ms_total": 10.0,
@@ -213,6 +227,59 @@ class TestEvaluatorHelpers(unittest.TestCase):
                 )
                 agg = evaluator._aggregate([run], bootstrap_count=0)
                 self.assertAlmostEqual(agg[metric_key], 100.0, places=9)
+
+    def test_merge_ready_value_counts_adjacent_equal_pairs_ge64(self) -> None:
+        board = [
+            [128, 128, 32, 32],
+            [128, 0, 64, 64],
+            [0, 64, 64, 0],
+            [0, 0, 0, 0],
+        ]
+        # Pairs counted (>=64):
+        # (0,0)-(0,1)=128
+        # (0,0)-(1,0)=128
+        # (1,2)-(1,3)=64
+        # (1,2)-(2,2)=64
+        # (2,1)-(2,2)=64
+        # 32+32 is ignored (<64).
+        self.assertEqual(evaluator._merge_ready_value(board), 448)
+
+    def test_aggregate_includes_time_to_promote_tile_counts_and_merge_ready(self) -> None:
+        run_a = self._make_run(
+            max_tile=4096,
+            initial_second_max_tile=512,
+            second_max_tile=2048,
+            peak_second_max_tile=2048,
+            time_to_promote_1024=4,
+            time_to_promote_2048=9,
+            time_to_promote_4096=None,
+            tile_count_ge1024_end=3,
+            tile_count_ge2048_end=2,
+            tile_count_ge4096_end=1,
+            merge_ready_value_end=512.0,
+        )
+        run_b = self._make_run(
+            max_tile=4096,
+            initial_second_max_tile=512,
+            second_max_tile=1024,
+            peak_second_max_tile=1024,
+            time_to_promote_1024=6,
+            time_to_promote_2048=None,
+            time_to_promote_4096=None,
+            tile_count_ge1024_end=2,
+            tile_count_ge2048_end=1,
+            tile_count_ge4096_end=1,
+            merge_ready_value_end=256.0,
+        )
+        agg = evaluator._aggregate([run_a, run_b], bootstrap_count=0)
+        self.assertAlmostEqual(agg["avg_time_to_promote1024_moves"], 5.0, places=9)
+        self.assertAlmostEqual(agg["avg_time_to_promote2048_moves"], 9.0, places=9)
+        self.assertEqual(agg["time_to_promote1024_count"], 2)
+        self.assertEqual(agg["time_to_promote2048_count"], 1)
+        self.assertAlmostEqual(agg["avg_tile_count_ge1024_end"], 2.5, places=9)
+        self.assertAlmostEqual(agg["avg_tile_count_ge2048_end"], 1.5, places=9)
+        self.assertAlmostEqual(agg["avg_tile_count_ge4096_end"], 1.0, places=9)
+        self.assertAlmostEqual(agg["avg_merge_ready_value_end"], 384.0, places=9)
 
     def test_simulate_move_planned_eval_uses_expectimax_projection(self) -> None:
         fixture = evaluator.Fixture(

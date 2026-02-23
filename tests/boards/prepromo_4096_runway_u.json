@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_4096_runway_u",
+  "description": "Wide 4096 runway with dense 512/256 bank and tactical power charges; intended to expose promotion acceleration choices.",
+  "board": [
+    [4096, 512, 512, 256],
+    [ 512, 256, 128,  64],
+    [ 256, 128,  64,  32],
+    [   0,   0,   0,   0]
+  ],
+  "score": 62450,
+  "powers": {"undo": 1, "swap": 1, "delete": 1}
+}

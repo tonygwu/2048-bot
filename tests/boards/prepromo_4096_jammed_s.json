@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_4096_jammed_s",
+  "description": "Near-full 4096 board with two 512 feeders and a single escape pocket; stresses tactical promotion under congestion.",
+  "board": [
+    [4096, 256, 512, 128],
+    [ 512, 256, 128,  64],
+    [ 256, 128,  64,  32],
+    [  16,   8,   4,   0]
+  ],
+  "score": 62250,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

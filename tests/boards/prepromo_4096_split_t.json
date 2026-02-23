@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_4096_split_t",
+  "description": "Split-lane 4096 setup with separated 512 tiles and open bottom row; checks whether policy consolidates lanes for 1024/2048.",
+  "board": [
+    [4096, 512,  64, 32],
+    [ 256, 128, 512, 16],
+    [ 128,  64,  32,  8],
+    [   0,   0,   0,  0]
+  ],
+  "score": 62180,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

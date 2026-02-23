@@ -16,6 +16,11 @@ This script defines and computes the shared metrics used across experiments:
   - promote1024%   : % of runs that promoted second-highest tile from <1024 to >=1024
   - promote2048%   : % of runs that promoted second-highest tile from <2048 to >=2048
   - promote4096%   : % of runs that promoted second-highest tile from <4096 to >=4096
+  - avg_time_to_promote1024_moves : average moves-to-promotion for second tile crossing 1024 (successful runs only)
+  - avg_time_to_promote2048_moves : average moves-to-promotion for second tile crossing 2048 (successful runs only)
+  - avg_tile_count_ge1024_end : average number of end-board tiles >=1024
+  - avg_tile_count_ge2048_end : average number of end-board tiles >=2048
+  - avg_merge_ready_value_end : average weighted value of adjacent equal high-tile pairs (>=64) at end of run
   - avg_moves      : average number of actions executed
 
 Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
@@ -67,6 +72,7 @@ DEFAULT_AB_PERMUTATIONS = 2000
 DEFAULT_MODULE = "strategy"
 DEFAULT_ARTIFACTS_DIR = ".eval_artifacts"
 UNDO_EARLY_STEP_THRESHOLD = 8
+MERGE_READY_MIN_TILE = 64
 
 POWERUP_LATE_BOARDS = [
     "late_powerup_bank",
@@ -531,6 +537,29 @@ def _top_two_tiles(board: list[list[int]]) -> tuple[int, int]:
     return vals[0], vals[1]
 
 
+def _count_tiles_ge(board: list[list[int]], threshold: int) -> int:
+    return sum(1 for row in board for v in row if v >= threshold)
+
+
+def _merge_ready_value(board: list[list[int]], min_tile: int = MERGE_READY_MIN_TILE) -> int:
+    """Weighted adjacency score for immediate high-tile merge opportunities.
+
+    Each horizontal/vertical adjacent equal pair contributes its tile value.
+    Low-value noise is excluded with `min_tile`.
+    """
+    total = 0
+    for r in range(4):
+        for c in range(4):
+            v = board[r][c]
+            if v < min_tile:
+                continue
+            if c + 1 < 4 and board[r][c + 1] == v:
+                total += v
+            if r + 1 < 4 and board[r + 1][c] == v:
+                total += v
+    return total
+
+
 def _log2_or_zero(value: int) -> float:
     return math.log2(value) if value > 0 else 0.0
 
@@ -551,6 +580,9 @@ def _simulate_one(
     powers = dict(fixture.powers)
     initial_max_tile, initial_second_max_tile = _top_two_tiles(board)
     peak_second_max_tile = initial_second_max_tile
+    time_to_promote_1024: int | None = None
+    time_to_promote_2048: int | None = None
+    time_to_promote_4096: int | None = None
 
     moves = 0
     think_ms_total = 0.0
@@ -681,6 +713,12 @@ def _simulate_one(
         _, second_after_action = _top_two_tiles(board)
         peak_second_max_tile = max(peak_second_max_tile, second_after_action)
         moves += 1
+        if initial_second_max_tile < 1024 <= second_after_action and time_to_promote_1024 is None:
+            time_to_promote_1024 = moves
+        if initial_second_max_tile < 2048 <= second_after_action and time_to_promote_2048 is None:
+            time_to_promote_2048 = moves
+        if initial_second_max_tile < 4096 <= second_after_action and time_to_promote_4096 is None:
+            time_to_promote_4096 = moves
         move_trace.append(
             {
                 "step": moves,
@@ -783,6 +821,12 @@ def _simulate_one(
             )
             _, second_after_undo = _top_two_tiles(board)
             peak_second_max_tile = max(peak_second_max_tile, second_after_undo)
+            if initial_second_max_tile < 1024 <= second_after_undo and time_to_promote_1024 is None:
+                time_to_promote_1024 = moves
+            if initial_second_max_tile < 2048 <= second_after_undo and time_to_promote_2048 is None:
+                time_to_promote_2048 = moves
+            if initial_second_max_tile < 4096 <= second_after_undo and time_to_promote_4096 is None:
+                time_to_promote_4096 = moves
             continue
 
     for evt in undo_events:
@@ -811,6 +855,10 @@ def _simulate_one(
     promote_1024 = initial_second_max_tile < 1024 <= peak_second_max_tile
     promote_2048 = initial_second_max_tile < 2048 <= peak_second_max_tile
     promote_4096 = initial_second_max_tile < 4096 <= peak_second_max_tile
+    tile_count_ge1024_end = _count_tiles_ge(board, 1024)
+    tile_count_ge2048_end = _count_tiles_ge(board, 2048)
+    tile_count_ge4096_end = _count_tiles_ge(board, 4096)
+    merge_ready_value_end = _merge_ready_value(board)
     return {
         "moves": moves,
         "score": score,
@@ -835,6 +883,13 @@ def _simulate_one(
         "promote_1024": promote_1024,
         "promote_2048": promote_2048,
         "promote_4096": promote_4096,
+        "time_to_promote_1024": time_to_promote_1024,
+        "time_to_promote_2048": time_to_promote_2048,
+        "time_to_promote_4096": time_to_promote_4096,
+        "tile_count_ge1024_end": tile_count_ge1024_end,
+        "tile_count_ge2048_end": tile_count_ge2048_end,
+        "tile_count_ge4096_end": tile_count_ge4096_end,
+        "merge_ready_value_end": merge_ready_value_end,
         "final_eval": fns.score_board(board, powers),
         "think_ms_total": think_ms_total,
         "think_ms_samples": think_samples,
@@ -881,6 +936,28 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
     total_undo_plan_gap_false_positive_used = sum(r.get("undo_plan_gap_false_positive_used", 0) for r in runs)
     total_undo_successes = sum(r.get("undo_successes", 0) for r in runs)
     undo_recovery_samples = [r.get("undo_avg_immediate_recovery", 0.0) for r in runs if r.get("undo_used", 0) > 0]
+    time_to_promote_1024 = [float(r["time_to_promote_1024"]) for r in runs if r.get("time_to_promote_1024") is not None]
+    time_to_promote_2048 = [float(r["time_to_promote_2048"]) for r in runs if r.get("time_to_promote_2048") is not None]
+    time_to_promote_4096 = [float(r["time_to_promote_4096"]) for r in runs if r.get("time_to_promote_4096") is not None]
+
+    def _tile_count_from_run(run: dict, threshold: int) -> int:
+        key = f"tile_count_ge{threshold}_end"
+        if key in run:
+            return int(run.get(key, 0) or 0)
+        final_board = run.get("final_board")
+        if isinstance(final_board, list):
+            return _count_tiles_ge(final_board, threshold)
+        max_tile = int(run.get("max_tile", 0) or 0)
+        second_tile = int(run.get("second_max_tile", 0) or 0)
+        return int(max_tile >= threshold) + int(second_tile >= threshold)
+
+    def _merge_ready_from_run(run: dict) -> float:
+        if "merge_ready_value_end" in run:
+            return float(run.get("merge_ready_value_end", 0.0) or 0.0)
+        final_board = run.get("final_board")
+        if isinstance(final_board, list):
+            return float(_merge_ready_value(final_board))
+        return 0.0
 
     def _promoted(run: dict, threshold: int) -> bool:
         key = f"promote_{threshold}"
@@ -916,6 +993,28 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
         "promote1024_pct": sum(1 for r in runs if _promoted(r, 1024)) * 100.0 / n,
         "promote2048_pct": sum(1 for r in runs if _promoted(r, 2048)) * 100.0 / n,
         "promote4096_pct": sum(1 for r in runs if _promoted(r, 4096)) * 100.0 / n,
+        "avg_time_to_promote1024_moves": (
+            sum(time_to_promote_1024) / len(time_to_promote_1024) if time_to_promote_1024 else 0.0
+        ),
+        "p50_time_to_promote1024_moves": _percentile(time_to_promote_1024, 50),
+        "p90_time_to_promote1024_moves": _percentile(time_to_promote_1024, 90),
+        "time_to_promote1024_count": len(time_to_promote_1024),
+        "avg_time_to_promote2048_moves": (
+            sum(time_to_promote_2048) / len(time_to_promote_2048) if time_to_promote_2048 else 0.0
+        ),
+        "p50_time_to_promote2048_moves": _percentile(time_to_promote_2048, 50),
+        "p90_time_to_promote2048_moves": _percentile(time_to_promote_2048, 90),
+        "time_to_promote2048_count": len(time_to_promote_2048),
+        "avg_time_to_promote4096_moves": (
+            sum(time_to_promote_4096) / len(time_to_promote_4096) if time_to_promote_4096 else 0.0
+        ),
+        "p50_time_to_promote4096_moves": _percentile(time_to_promote_4096, 50),
+        "p90_time_to_promote4096_moves": _percentile(time_to_promote_4096, 90),
+        "time_to_promote4096_count": len(time_to_promote_4096),
+        "avg_tile_count_ge1024_end": sum(_tile_count_from_run(r, 1024) for r in runs) / n,
+        "avg_tile_count_ge2048_end": sum(_tile_count_from_run(r, 2048) for r in runs) / n,
+        "avg_tile_count_ge4096_end": sum(_tile_count_from_run(r, 4096) for r in runs) / n,
+        "avg_merge_ready_value_end": sum(_merge_ready_from_run(r) for r in runs) / n,
         "avg_moves": total_moves / n,
         "avg_eval": sum(r["final_eval"] for r in runs) / n,
         "avg_think_ms": (sum(r["think_ms_total"] for r in runs) / max(1, total_moves)),
@@ -1052,6 +1151,20 @@ def evaluate_suite(
                         continue
                     initial_second = int(match.get("initial_second_max_tile", 0))
                     peak_second = int(match.get("peak_second_max_tile", match.get("second_max_tile", 0)))
+                    final_board = match.get("final_board")
+                    if isinstance(final_board, list):
+                        tile_count_ge1024_end = int(match.get("tile_count_ge1024_end", _count_tiles_ge(final_board, 1024)))
+                        tile_count_ge2048_end = int(match.get("tile_count_ge2048_end", _count_tiles_ge(final_board, 2048)))
+                        tile_count_ge4096_end = int(match.get("tile_count_ge4096_end", _count_tiles_ge(final_board, 4096)))
+                        merge_ready_value_end = float(match.get("merge_ready_value_end", _merge_ready_value(final_board)))
+                    else:
+                        # Fallback for legacy rows without final_board snapshots.
+                        max_tile = int(match.get("max_tile", 0))
+                        second_tile = int(match.get("second_max_tile", 0))
+                        tile_count_ge1024_end = int(max_tile >= 1024) + int(second_tile >= 1024)
+                        tile_count_ge2048_end = int(max_tile >= 2048) + int(second_tile >= 2048)
+                        tile_count_ge4096_end = int(max_tile >= 4096) + int(second_tile >= 4096)
+                        merge_ready_value_end = float(match.get("merge_ready_value_end", 0.0))
                     results_by_key[public_key] = {
                         "moves": match["moves"],
                         "score": match["score"],
@@ -1076,6 +1189,13 @@ def evaluate_suite(
                         "promote_1024": bool(match.get("promote_1024", initial_second < 1024 <= peak_second)),
                         "promote_2048": bool(match.get("promote_2048", initial_second < 2048 <= peak_second)),
                         "promote_4096": bool(match.get("promote_4096", initial_second < 4096 <= peak_second)),
+                        "time_to_promote_1024": match.get("time_to_promote_1024"),
+                        "time_to_promote_2048": match.get("time_to_promote_2048"),
+                        "time_to_promote_4096": match.get("time_to_promote_4096"),
+                        "tile_count_ge1024_end": tile_count_ge1024_end,
+                        "tile_count_ge2048_end": tile_count_ge2048_end,
+                        "tile_count_ge4096_end": tile_count_ge4096_end,
+                        "merge_ready_value_end": merge_ready_value_end,
                         "final_eval": match["final_eval"],
                         "think_ms_total": match["think_ms_total"],
                         "think_ms_samples": match.get("think_ms_samples", []),
@@ -1090,7 +1210,7 @@ def evaluate_suite(
                             "undo": int(match.get("actions", {}).get("undo", 0)),
                         },
                         "termination_reason": match.get("termination_reason", "resumed"),
-                        "final_board": match.get("final_board"),
+                        "final_board": final_board,
                         "final_powers": match.get("final_powers"),
                         "undo_used": int(match.get("undo_used", 0)),
                         "undo_early_used": int(match.get("undo_early_used", 0)),
@@ -1282,6 +1402,11 @@ def _print_metric_glossary() -> None:
     print("  promote1024% : % of runs that promoted second-highest tile from <1024 to >=1024")
     print("  promote2048% : % of runs that promoted second-highest tile from <2048 to >=2048")
     print("  promote4096% : % of runs that promoted second-highest tile from <4096 to >=4096")
+    print("  avg_time_to_promote1024_moves : average moves to second-tile promotion >=1024 (successful runs only)")
+    print("  avg_time_to_promote2048_moves : average moves to second-tile promotion >=2048 (successful runs only)")
+    print("  avg_tile_count_ge1024_end : average count of end-board tiles >=1024")
+    print("  avg_tile_count_ge2048_end : average count of end-board tiles >=2048")
+    print("  avg_merge_ready_value_end : average weighted adjacent-equal merge value (>=64) at end")
     print("  second_ge4096% : % of runs where second-highest tile >= 4096")
     print("  second_ge8192% : % of runs where second-highest tile >= 8192")
     print("  peak_second_ge4096% : % of runs where second-highest tile reached >= 4096 at any step")
@@ -1301,6 +1426,7 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
         "| depth | avg_score | score_ci95 | avg_max | max_ci95 | survive% | reach2048% | "
         "reach4096% | reach8192% | reach16384% | avg_second_max | avg_second_gain | promotion_stall% | "
         "promote1024% | promote2048% | promote4096% | second_ge4096% | second_ge8192% | peak_second_ge4096% | "
+        "avg_ttp1024 | avg_ttp2048 | avg_tile_ge1024_end | avg_tile_ge2048_end | avg_merge_ready_end | "
         "avg_moves | avg_eval | eval_ci95 | avg_think_ms | "
         "think_p50 | think_p90 | think_p99 | cache_hit_rate% | undo_used | undo_plan_gap_fp% | undo_success% |"
     )
@@ -1318,6 +1444,9 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
             f"{r.get('promote2048_pct', 0.0):.1f} | {r.get('promote4096_pct', 0.0):.1f} | "
             f"{r.get('second_ge4096_pct', 0.0):.1f} | {r.get('second_ge8192_pct', 0.0):.1f} | "
             f"{r.get('peak_second_ge4096_pct', 0.0):.1f} | "
+            f"{r.get('avg_time_to_promote1024_moves', 0.0):.1f} | {r.get('avg_time_to_promote2048_moves', 0.0):.1f} | "
+            f"{r.get('avg_tile_count_ge1024_end', 0.0):.2f} | {r.get('avg_tile_count_ge2048_end', 0.0):.2f} | "
+            f"{r.get('avg_merge_ready_value_end', 0.0):.1f} | "
             f"{r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {eval_ci} | "
             f"{r['avg_think_ms']:.2f} | {r['think_p50_ms']:.2f} | {r['think_p90_ms']:.2f} | "
             f"{r['think_p99_ms']:.2f} | {r['cache_hit_rate_pct']:.1f} | "
@@ -1332,6 +1461,7 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
         "| fixture | avg_score | avg_max | survive% | reach2048% | "
         "reach4096% | reach8192% | reach16384% | avg_second_max | avg_second_gain | promotion_stall% | "
         "promote1024% | promote2048% | promote4096% | second_ge4096% | second_ge8192% | peak_second_ge4096% | "
+        "avg_ttp1024 | avg_ttp2048 | avg_tile_ge1024_end | avg_tile_ge2048_end | avg_merge_ready_end | "
         "avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
         "action_mix(move/swap/delete/undo) | undo_plan_gap_fp% | undo_success% |"
     )
@@ -1347,6 +1477,9 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
             f"{s.get('promote2048_pct', 0.0):.1f} | {s.get('promote4096_pct', 0.0):.1f} | "
             f"{s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
             f"{s.get('peak_second_ge4096_pct', 0.0):.1f} | "
+            f"{s.get('avg_time_to_promote1024_moves', 0.0):.1f} | {s.get('avg_time_to_promote2048_moves', 0.0):.1f} | "
+            f"{s.get('avg_tile_count_ge1024_end', 0.0):.2f} | {s.get('avg_tile_count_ge2048_end', 0.0):.2f} | "
+            f"{s.get('avg_merge_ready_value_end', 0.0):.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
             f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_plan_gap_false_positive_rate_pct', 0.0):.1f} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
         )
@@ -1358,6 +1491,7 @@ def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
         "| group | avg_score | avg_max | survive% | reach2048% | "
         "reach4096% | reach8192% | reach16384% | avg_second_max | avg_second_gain | promotion_stall% | "
         "promote1024% | promote2048% | promote4096% | second_ge4096% | second_ge8192% | peak_second_ge4096% | "
+        "avg_ttp1024 | avg_ttp2048 | avg_tile_ge1024_end | avg_tile_ge2048_end | avg_merge_ready_end | "
         "avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
         "action_mix(move/swap/delete/undo) | undo_plan_gap_fp% | undo_success% |"
     )
@@ -1373,6 +1507,9 @@ def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
             f"{s.get('promote2048_pct', 0.0):.1f} | {s.get('promote4096_pct', 0.0):.1f} | "
             f"{s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
             f"{s.get('peak_second_ge4096_pct', 0.0):.1f} | "
+            f"{s.get('avg_time_to_promote1024_moves', 0.0):.1f} | {s.get('avg_time_to_promote2048_moves', 0.0):.1f} | "
+            f"{s.get('avg_tile_count_ge1024_end', 0.0):.2f} | {s.get('avg_tile_count_ge2048_end', 0.0):.2f} | "
+            f"{s.get('avg_merge_ready_value_end', 0.0):.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
             f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_plan_gap_false_positive_rate_pct', 0.0):.1f} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
         )
