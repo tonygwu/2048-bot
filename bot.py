@@ -1027,6 +1027,116 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
     page = None
     all_stats = []
     pending_db_flushes: list[dict[str, Any]] = []
+    flush_completed = False
+    interrupted = False
+
+    def _flush_cache_updates(
+        reason: str,
+        include_current_drains: bool = False,
+    ) -> None:
+        if include_current_drains:
+            residual_eval_entries = drain_new_entries()
+            residual_search_entries = drain_search_new_entries()
+            if residual_eval_entries or residual_search_entries:
+                ts_now = get_trans_stats()
+                ss_now = get_search_trans_stats()
+                eval_total_lookups = ts_now["hits"] + ts_now["misses"]
+                eval_hit_rate = ts_now["hits"] / eval_total_lookups * 100 if eval_total_lookups else 0.0
+                search_total_lookups = ss_now["hits"] + ss_now["misses"]
+                search_hit_rate = ss_now["hits"] / search_total_lookups * 100 if search_total_lookups else 0.0
+                pending_db_flushes.append(
+                    {
+                        "game_num": "residual",
+                        "eval_new_entries": residual_eval_entries,
+                        "search_new_entries": residual_search_entries,
+                        "eval_hits": ts_now["hits"],
+                        "eval_misses": ts_now["misses"],
+                        "eval_hit_rate": eval_hit_rate,
+                        "search_hits": ss_now["hits"],
+                        "search_misses": ss_now["misses"],
+                        "search_hit_rate": search_hit_rate,
+                    }
+                )
+
+        if not pending_db_flushes:
+            return
+
+        total_flush_eval_rows = 0
+        total_flush_search_rows = 0
+        total_flush_seconds = 0.0
+        print(f"\nPersisting cache updates to DB ({reason})...")
+        for item in pending_db_flushes:
+            game_label = str(item.get("game_num", "?"))
+            eval_entries = item["eval_new_entries"]
+            search_entries = item["search_new_entries"]
+            eval_hits = int(item["eval_hits"])
+            eval_misses = int(item["eval_misses"])
+            eval_hit_rate = float(item["eval_hit_rate"])
+            search_hits = int(item["search_hits"])
+            search_misses = int(item["search_misses"])
+            search_hit_rate = float(item["search_hit_rate"])
+            print(
+                f"\nCache stats (game {game_label}): "
+                f"eval hits={eval_hits:,} misses={eval_misses:,} hit_rate={eval_hit_rate:.1f}%  "
+                f"search hits={search_hits:,} misses={search_misses:,} hit_rate={search_hit_rate:.1f}%  "
+                f"new_eval={len(eval_entries):,} new_search={len(search_entries):,}"
+            )
+            if not eval_entries and not search_entries:
+                print("  No new entries to flush.")
+                continue
+
+            def _print_flush_progress(label: str, done: int, total: int) -> None:
+                width = 28
+                ratio = min(1.0, done / total) if total else 1.0
+                filled = int(width * ratio)
+                bar = "#" * filled + "-" * (width - filled)
+                print(
+                    f"\r  Flushing {label}: [{bar}] {done:,}/{total:,} ({ratio*100:5.1f}%)",
+                    end="",
+                    flush=True,
+                )
+
+            t_flush = time.time()
+            written_eval = 0
+            written_search = 0
+            if eval_entries:
+                try:
+                    written_eval = db.save_entries(
+                        eval_entries,
+                        SCORE_BOARD_VERSION,
+                        progress_cb=lambda d, t: _print_flush_progress("eval", d, t),
+                    )
+                except Exception as exc:
+                    print(f"\n  Eval cache flush failed: {type(exc).__name__}: {exc}")
+                print()
+            if search_entries:
+                try:
+                    written_search = db.save_search_entries(
+                        search_entries,
+                        SCORE_BOARD_VERSION,
+                        SEARCH_CACHE_VERSION,
+                        progress_cb=lambda d, t: _print_flush_progress("search", d, t),
+                    )
+                except Exception as exc:
+                    print(f"\n  Search cache flush failed: {type(exc).__name__}: {exc}")
+                print()
+            flush_seconds = time.time() - t_flush
+            total_flush_eval_rows += written_eval
+            total_flush_search_rows += written_search
+            total_flush_seconds += flush_seconds
+            print(
+                f"  Flushed eval={written_eval:,} search={written_search:,} rows "
+                f"in {flush_seconds:.1f}s. "
+                f"(eval_cache_size={get_trans_table_size():,}, "
+                f"search_cache_size={get_search_trans_table_size():,})"
+            )
+        pending_db_flushes.clear()
+        if total_flush_eval_rows > 0 or total_flush_search_rows > 0:
+            print(
+                f"\nDB flush complete: eval={total_flush_eval_rows:,} "
+                f"search={total_flush_search_rows:,} rows written in "
+                f"{total_flush_seconds:.1f}s total."
+            )
     try:
         pw, browser, page = await launch_browser(headless=headless)
         for game_num in range(1, num_games + 1):
@@ -1156,82 +1266,26 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
                 )
 
         # ── Persist cache updates after summary output ────────────────────────
-        total_flush_eval_rows = 0
-        total_flush_search_rows = 0
-        total_flush_seconds = 0.0
-        if pending_db_flushes:
-            print("\nPersisting cache updates to DB...")
-        for item in pending_db_flushes:
-            game_num = int(item["game_num"])
-            eval_entries = item["eval_new_entries"]
-            search_entries = item["search_new_entries"]
-            eval_hits = int(item["eval_hits"])
-            eval_misses = int(item["eval_misses"])
-            eval_hit_rate = float(item["eval_hit_rate"])
-            search_hits = int(item["search_hits"])
-            search_misses = int(item["search_misses"])
-            search_hit_rate = float(item["search_hit_rate"])
-            print(
-                f"\nCache stats (game {game_num}): "
-                f"eval hits={eval_hits:,} misses={eval_misses:,} hit_rate={eval_hit_rate:.1f}%  "
-                f"search hits={search_hits:,} misses={search_misses:,} hit_rate={search_hit_rate:.1f}%  "
-                f"new_eval={len(eval_entries):,} new_search={len(search_entries):,}"
-            )
-            if not eval_entries and not search_entries:
-                print("  No new entries to flush.")
-                continue
-
-            def _print_flush_progress(label: str, done: int, total: int) -> None:
-                width = 28
-                ratio = min(1.0, done / total) if total else 1.0
-                filled = int(width * ratio)
-                bar = "#" * filled + "-" * (width - filled)
-                print(
-                    f"\r  Flushing {label}: [{bar}] {done:,}/{total:,} ({ratio*100:5.1f}%)",
-                    end="",
-                    flush=True,
-                )
-
-            t_flush = time.time()
-            written_eval = 0
-            written_search = 0
-            if eval_entries:
-                written_eval = db.save_entries(
-                    eval_entries,
-                    SCORE_BOARD_VERSION,
-                    progress_cb=lambda d, t: _print_flush_progress("eval", d, t),
-                )
-                print()
-            if search_entries:
-                written_search = db.save_search_entries(
-                    search_entries,
-                    SCORE_BOARD_VERSION,
-                    SEARCH_CACHE_VERSION,
-                    progress_cb=lambda d, t: _print_flush_progress("search", d, t),
-                )
-                print()
-            flush_seconds = time.time() - t_flush
-            total_flush_eval_rows += written_eval
-            total_flush_search_rows += written_search
-            total_flush_seconds += flush_seconds
-            print(
-                f"  Flushed eval={written_eval:,} search={written_search:,} rows "
-                f"in {flush_seconds:.1f}s. "
-                f"(eval_cache_size={get_trans_table_size():,}, "
-                f"search_cache_size={get_search_trans_table_size():,})"
-            )
-        if total_flush_eval_rows > 0 or total_flush_search_rows > 0:
-            print(
-                f"\nDB flush complete: eval={total_flush_eval_rows:,} "
-                f"search={total_flush_search_rows:,} rows written in "
-                f"{total_flush_seconds:.1f}s total."
-            )
+        _flush_cache_updates(reason="normal-completion", include_current_drains=False)
+        flush_completed = True
 
         if not headless:
             print("\nKeeping browser open for 25s so you can see the final state…")
             await asyncio.sleep(25)
 
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\nKeyboardInterrupt received — flushing caches before exit...")
+        if profiler.enabled:
+            try:
+                profiler.emit("run_interrupt", maxrss_raw=_maxrss_raw())
+            except Exception:
+                pass
+        raise
     finally:
+        if not flush_completed:
+            shutdown_reason = "keyboard-interrupt" if interrupted else "shutdown"
+            _flush_cache_updates(reason=shutdown_reason, include_current_drains=True)
         cache_loader.close()
         if profiler.enabled:
             try:
@@ -1269,12 +1323,16 @@ def main():
         except ValueError:
             parser.error(f"--depth must be an integer or 'auto', got: {args.depth!r}")
 
-    asyncio.run(run_bot(
-        headless=args.headless,
-        depth_arg=depth_arg,
-        num_games=args.games,
-        profile_log=args.profile_log,
-    ))
+    try:
+        asyncio.run(run_bot(
+            headless=args.headless,
+            depth_arg=depth_arg,
+            num_games=args.games,
+            profile_log=args.profile_log,
+        ))
+    except KeyboardInterrupt:
+        print("\nStopped by user.")
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

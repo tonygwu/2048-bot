@@ -38,6 +38,7 @@ from strategy import (
     auto_depth,
     best_action,
     drain_new_entries,
+    drain_search_new_entries,
     is_game_over,
     score_board,
     _expectimax,
@@ -198,6 +199,7 @@ def run(
     *,
     write_to_cache: bool = False,
     cache_target_version: str = SCORE_BOARD_VERSION,
+    search_cache_target_version: str = SEARCH_CACHE_VERSION,
     cache_write_chunk: int = 50_000,
     cache_flush_every_moves: int = 100,
     episode_index: int = 1,
@@ -210,28 +212,44 @@ def run(
     name = fixture.get("name", "unnamed")
     desc = fixture.get("description", "")
     cache_target_version = cache_target_version.strip() or SCORE_BOARD_VERSION
+    search_cache_target_version = search_cache_target_version.strip() or SEARCH_CACHE_VERSION
     cache_write_chunk = max(1, int(cache_write_chunk))
     cache_flush_every_moves = max(1, int(cache_flush_every_moves))
-    cache_written_total = 0
+    cache_written_eval_total = 0
+    cache_written_search_total = 0
 
     def flush_cache_entries(reason: str) -> int:
-        nonlocal cache_written_total
+        nonlocal cache_written_eval_total, cache_written_search_total
         if not write_to_cache:
             return 0
-        new_entries = drain_new_entries()
-        if not new_entries:
+        new_eval_entries = drain_new_entries()
+        new_search_entries = drain_search_new_entries()
+        if not new_eval_entries and not new_search_entries:
             return 0
-        written = db.save_entries(
-            new_entries,
-            cache_target_version,
-            batch_size=cache_write_chunk,
-        )
-        cache_written_total += written
+        written_eval = 0
+        written_search = 0
+        if new_eval_entries:
+            written_eval = db.save_entries(
+                new_eval_entries,
+                cache_target_version,
+                batch_size=cache_write_chunk,
+            )
+            cache_written_eval_total += written_eval
+        if new_search_entries:
+            written_search = db.save_search_entries(
+                new_search_entries,
+                eval_version=cache_target_version,
+                search_version=search_cache_target_version,
+                batch_size=cache_write_chunk,
+            )
+            cache_written_search_total += written_search
+        written_total = written_eval + written_search
         print(
-            f"  [cache] flushed {written:,} entries ({reason}, total={cache_written_total:,}, "
-            f"target_version={cache_target_version!r})"
+            f"  [cache] flushed eval={written_eval:,} search={written_search:,} ({reason}, "
+            f"eval_total={cache_written_eval_total:,}, search_total={cache_written_search_total:,}, "
+            f"eval_version={cache_target_version!r}, search_version={search_cache_target_version!r})"
         )
-        return written
+        return written_total
 
     print(f"\n{'═'*54}")
     if episodes_total > 1:
@@ -242,7 +260,8 @@ def run(
     print(f"{'═'*54}")
     if write_to_cache:
         print(
-            f"  Cache write: enabled  target_version={cache_target_version!r}  "
+            f"  Cache write: enabled  eval_version={cache_target_version!r}  "
+            f"search_version={search_cache_target_version!r}  "
             f"flush_every_moves={cache_flush_every_moves}  write_chunk={cache_write_chunk:,}"
         )
 
@@ -256,7 +275,13 @@ def run(
     if is_game_over(board):
         print("\nThis board is already game-over — no moves possible.")
         flush_cache_entries("game-over-initial")
-        return {"cache_written": cache_written_total, "moves_played": 0}
+        total_written = cache_written_eval_total + cache_written_search_total
+        return {
+            "cache_written": total_written,
+            "cache_written_eval": cache_written_eval_total,
+            "cache_written_search": cache_written_search_total,
+            "moves_played": 0,
+        }
 
     action_num = 0
     blocked_action_once = None
@@ -389,8 +414,18 @@ def run(
     flush_cache_entries("final")
     print(f"\nFinal  score={score}  max_tile={max_tile}")
     if write_to_cache:
-        print(f"Cache write summary: {cache_written_total:,} entries written to version {cache_target_version!r}")
-    return {"cache_written": cache_written_total, "moves_played": action_num}
+        print(
+            "Cache write summary: "
+            f"eval={cache_written_eval_total:,} (version={cache_target_version!r})  "
+            f"search={cache_written_search_total:,} (version={search_cache_target_version!r})"
+        )
+    total_written = cache_written_eval_total + cache_written_search_total
+    return {
+        "cache_written": total_written,
+        "cache_written_eval": cache_written_eval_total,
+        "cache_written_search": cache_written_search_total,
+        "moves_played": action_num,
+    }
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -452,6 +487,10 @@ examples:
         help="Version label for cache writes (default: SCORE_BOARD_VERSION)",
     )
     parser.add_argument(
+        "--search-cache-target-version", type=str, default=SEARCH_CACHE_VERSION,
+        help="Search cache version label for cache writes (default: SEARCH_CACHE_VERSION)",
+    )
+    parser.add_argument(
         "--cache-write-chunk", type=int, default=50_000,
         help="Batch size for SQLite writes when --write-to-cache is enabled (default: 50000)",
     )
@@ -492,6 +531,8 @@ examples:
         print(f"(random seed: {args.seed})")
 
     total_written = 0
+    total_written_eval = 0
+    total_written_search = 0
     total_actions = 0
     for episode in range(1, args.episodes + 1):
         result = run(
@@ -504,18 +545,22 @@ examples:
             no_random=args.no_random,
             write_to_cache=args.write_to_cache,
             cache_target_version=args.cache_target_version,
+            search_cache_target_version=args.search_cache_target_version,
             cache_write_chunk=args.cache_write_chunk,
             cache_flush_every_moves=args.cache_flush_every_moves,
             episode_index=episode,
             episodes_total=args.episodes,
         )
         total_written += int(result.get("cache_written", 0))
+        total_written_eval += int(result.get("cache_written_eval", 0))
+        total_written_search += int(result.get("cache_written_search", 0))
         total_actions += int(result.get("moves_played", 0))
 
     if args.episodes > 1:
         print(
             f"\nEpisodes summary: episodes={args.episodes}  "
-            f"moves_played={total_actions:,}  cache_written={total_written:,}"
+            f"moves_played={total_actions:,}  cache_written={total_written:,}  "
+            f"(eval={total_written_eval:,}, search={total_written_search:,})"
         )
 
 
