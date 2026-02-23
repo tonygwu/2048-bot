@@ -59,8 +59,8 @@ from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
 TARGET_TILE = 16384   # stop once this tile is reached
 PROFILE_LOG_DIR = Path(".bot_logs")
-CACHE_MIN_TILE = 1024
-INITIAL_PRELOAD_MIN_TILE = 1024
+CACHE_MIN_TILE = 2048
+INITIAL_PRELOAD_MIN_TILE = 2048
 INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE = 4096
 BACKGROUND_LOAD_TRIGGER_TILE = 2048
 POST_TRIGGER_LOAD_MIN_TILE = 4096

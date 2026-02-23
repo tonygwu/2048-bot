@@ -17,7 +17,7 @@ SCORE_BOARD_VERSION = "1.7"
 
 _TRANS_CAP = 500_000
 _TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
-MIN_TRANS_CACHE_TILE = 1024
+MIN_TRANS_CACHE_TILE = 2048
 
 
 def _normalize_trans_key(key) -> int:
