@@ -56,6 +56,10 @@ cat .eval_artifacts/LATEST_RUN.txt
 ls -lah "$(cat .eval_artifacts/LATEST_RUN.txt)"
 head -n 5 "$(cat .eval_artifacts/LATEST_RUN.txt)/moves.jsonl"
 
+# Committable perf reports from bot profile logs
+python3 scripts/perf_report.py --label baseline
+python3 scripts/perf_report.py --label candidate --baseline-report reports/perf/<baseline_report>.json
+
 # Compatibility wrapper (delegates to tests/evaluator.py depth_calibration suite)
 # Deprecated for new experiments: prefer tests/evaluator.py directly.
 .venv/bin/python benchmark_depth.py
@@ -205,6 +209,7 @@ Use these definitions consistently when comparing strategy changes:
 
 - `tests/evaluator.py` is the canonical offline harness for depth/heuristic experiments.
 - Evaluator artifacts are auto-written by default under `.eval_artifacts/` (gitignored). Each run gets a folder named with timestamp + suite + module + depths + seed range (+ optional `--run-label`), plus `.eval_artifacts/LATEST_RUN.txt` points to the newest run.
+- Bot profiling logs under `.bot_logs/` are gitignored; use `python3 scripts/perf_report.py ...` to generate compact, committable summaries under `reports/perf/`.
 - Core summary metrics: `avg_score`, `avg_max`, `survive%`, `reach2048%`, `reach4096%`, `reach8192%`, `avg_moves`.
 - Diagnostics: `avg_eval`, `avg_think_ms`, `think_p50/think_p90/think_p99`, `cache_hit_rate%`, action mix (`move/swap/delete`).
 - CI bands: summary includes bootstrap 95% CIs for `avg_score`, `avg_max`, `avg_eval` (configured by `--bootstraps`).
