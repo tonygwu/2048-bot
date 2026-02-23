@@ -1189,19 +1189,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
         SEARCH_CACHE_VERSION,
         profiler=profiler,
     )
-    try:
-        versions = db.list_versions()
-        eval_rows = versions.get(SCORE_BOARD_VERSION, 0)
-        print(f"Eval cache rows for version {SCORE_BOARD_VERSION!r}: {eval_rows:,}")
-
-        search_versions = db.list_search_versions()
-        search_rows = search_versions.get((SCORE_BOARD_VERSION, SEARCH_CACHE_VERSION), 0)
-        print(
-            "Search cache rows for versions "
-            f"({SCORE_BOARD_VERSION!r}, {SEARCH_CACHE_VERSION!r}): {search_rows:,}"
-        )
-    except Exception as e:
-        print(f"Could not read cache version counts from DB: {e}")
+    print("Skipping startup cache row-count scans (deferred for faster startup).")
 
     try:
         cache_loader.start_initial_load_async()
