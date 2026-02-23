@@ -320,6 +320,11 @@ def load_version_by_max_tile_range(
     Filter semantics:
     - min_max_tile is inclusive lower bound on board max tile
     - max_max_tile is inclusive upper bound on board max tile
+
+    Only canonical board-cache rows are returned:
+    - undo_uses = 0
+    - swap_uses = 0
+    - delete_uses = 0
     """
     if not os.path.exists(DB_PATH):
         return {}
@@ -337,33 +342,49 @@ def load_version_by_max_tile_range(
         if max_max_tile is not None:
             where.append("bb_max_exp(board_bb) <= ?")
             params.append(_tile_to_max_exp(max_max_tile))
-        where_sql = " AND ".join(where)
+        canonical_where = where + ["undo_uses = 0", "swap_uses = 0", "delete_uses = 0"]
+        canonical_where_sql = " AND ".join(canonical_where)
+        legacy_where = where + ["swap_uses = 0", "delete_uses = 0"]
+        legacy_where_sql = " AND ".join(legacy_where)
 
         try:
             if total_rows is None:
                 total_rows = conn.execute(
-                    f"SELECT COUNT(*) FROM entries WHERE {where_sql}",
+                    f"SELECT COUNT(*) FROM entries WHERE {canonical_where_sql}",
                     tuple(params),
                 ).fetchone()[0]
             cur = conn.execute(
-                "SELECT board_bb, swap_uses, delete_uses, score "
-                f"FROM entries WHERE {where_sql} "
-                "ORDER BY board_bb, swap_uses, delete_uses",
+                "SELECT board_bb, score "
+                f"FROM entries WHERE {canonical_where_sql} "
+                "ORDER BY board_bb",
                 tuple(params),
             )
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return {}
-            raise
+            if "no such column" in str(exc).lower() and "undo_uses" in str(exc).lower():
+                if total_rows is None:
+                    total_rows = conn.execute(
+                        f"SELECT COUNT(*) FROM entries WHERE {legacy_where_sql}",
+                        tuple(params),
+                    ).fetchone()[0]
+                cur = conn.execute(
+                    "SELECT board_bb, score "
+                    f"FROM entries WHERE {legacy_where_sql} "
+                    "ORDER BY board_bb",
+                    tuple(params),
+                )
+            else:
+                raise
 
         loaded = 0
-        out: dict[tuple[int, int, int], float] = {}
+        out: dict[int, float] = {}
         while True:
             rows = cur.fetchmany(batch)
             if not rows:
                 break
-            for bb, su, du, score in rows:
-                out[(_from_signed(bb), su, du)] = score
+            for bb, score in rows:
+                out[_from_signed(bb)] = score
             loaded += len(rows)
             if progress_cb is not None:
                 try:

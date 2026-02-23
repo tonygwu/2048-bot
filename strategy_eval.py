@@ -83,7 +83,10 @@ def evict_trans_below_max_tile(min_tile: int) -> int:
     if threshold <= 1:
         return 0
     min_exp = threshold.bit_length() - 1
-    drop_keys = [k for k in _TRANS_CACHE.table.keys() if _max_exp_from_bb(k[0]) < min_exp]
+    drop_keys = [
+        k for k in _TRANS_CACHE.table.keys()
+        if _max_exp_from_bb(_normalize_trans_key(k)) < min_exp
+    ]
     for key in drop_keys:
         _TRANS_CACHE.table.pop(key, None)
         _TRANS_CACHE.new_entries.pop(key, None)
