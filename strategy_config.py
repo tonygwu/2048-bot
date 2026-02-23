@@ -6,9 +6,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class DepthPolicy:
     min_depth: int = 5
-    max_depth: int = 6
-    soft_max: int = 6
-    # Keep auto-depth anchored at 5 unless board pressure strongly justifies 6.
+    max_depth: int = 5
+    soft_max: int = 5
+    # Cap auto-depth at 5 to avoid late-game depth-6 latency spikes.
     base: float = 1.10
     w_max: float = 0.20
     w_full: float = 0.95
@@ -18,7 +18,7 @@ class DepthPolicy:
     open_empties_threshold: int = 8
     open_penalty: float = 0.55
     jammed_empties_threshold: int = 2
-    # Keep a bump for jammed boards, but avoid over-escalating to depth 6.
+    # Keep a bump for jammed boards without exceeding depth 5.
     jammed_bonus: float = 0.35
     low_valid_bonus_threshold: int = 2
     low_valid_bonus: float = 0.15
@@ -36,7 +36,7 @@ class DepthPolicy:
     tight_valid_threshold: int = 3
     tight_bonus: float = 0.30
     near_death_empties_threshold: int = 1
-    # Depth-6 is the hard ceiling; reserve it for true near-death crises.
+    # Preserve near-death gate behavior, but ceiling remains depth 5.
     near_death_valid_threshold: int = 2
     near_death_rough_threshold: float = 0.95
     near_death_max_log_threshold: float = 11.0
