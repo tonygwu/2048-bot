@@ -8,19 +8,19 @@ class DepthPolicy:
     min_depth: int = 3
     max_depth: int = 5
     soft_max: int = 5
-    # Keep auto-depth in the 3-5 band: default to lower depth in calmer boards,
-    # while still allowing 5 in jammed/late states.
-    base: float = 0.80
+    # Keep auto-depth in the 3-5 band with a slight preference for depth 4
+    # over depth 5 across typical fixture boards.
+    base: float = 0.60
     w_max: float = 0.20
-    w_full: float = 0.90
-    w_blocked: float = 0.65
+    w_full: float = 0.75
+    w_blocked: float = 0.55
     w_rough: float = 0.35
     rough_norm_divisor: float = 36.0
     open_empties_threshold: int = 8
     open_penalty: float = 0.55
     jammed_empties_threshold: int = 2
-    # Keep a bump for jammed boards without exceeding depth 5.
-    jammed_bonus: float = 0.35
+    # Keep a bump for jammed boards without over-promoting depth 5.
+    jammed_bonus: float = 0.20
     low_valid_bonus_threshold: int = 2
     low_valid_bonus: float = 0.15
     # In open/mid-game boards, low legal-move count is often temporary noise.
