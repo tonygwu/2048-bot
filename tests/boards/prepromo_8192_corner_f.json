@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_corner_f",
+  "description": "8192 corner anchor with duplicated 512/256 layers that can be reshaped into a stronger runner-up tile.",
+  "board": [
+    [8192,  256, 128,  64],
+    [1024,  512, 256, 128],
+    [ 512,  256, 128,  64],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126400,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

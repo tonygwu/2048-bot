@@ -13,6 +13,9 @@ This script defines and computes the shared metrics used across experiments:
   - avg_second_max : average second-highest tile at end of run
   - avg_second_gain: average second-highest-tile gain over the run
   - promotion_stall%: percentage of runs with no second-highest-tile growth
+  - promote1024%   : % of runs that promoted second-highest tile from <1024 to >=1024
+  - promote2048%   : % of runs that promoted second-highest tile from <2048 to >=2048
+  - promote4096%   : % of runs that promoted second-highest tile from <4096 to >=4096
   - avg_moves      : average number of actions executed
 
 Additional diagnostics are also reported (avg_eval, avg_think_ms, action mix).
@@ -795,6 +798,9 @@ def _simulate_one(
     undo_early_used = sum(1 for evt in undo_events if int(evt.get("trigger_step", 10**9)) <= UNDO_EARLY_STEP_THRESHOLD)
     second_max_gain = second_max_tile - initial_second_max_tile
     second_log_gain = _log2_or_zero(second_max_tile) - _log2_or_zero(initial_second_max_tile)
+    promote_1024 = initial_second_max_tile < 1024 <= peak_second_max_tile
+    promote_2048 = initial_second_max_tile < 2048 <= peak_second_max_tile
+    promote_4096 = initial_second_max_tile < 4096 <= peak_second_max_tile
     return {
         "moves": moves,
         "score": score,
@@ -816,6 +822,9 @@ def _simulate_one(
         "second_max_gain": second_max_gain,
         "second_log_gain": second_log_gain,
         "promotion_stalled": second_max_gain <= 0,
+        "promote_1024": promote_1024,
+        "promote_2048": promote_2048,
+        "promote_4096": promote_4096,
         "final_eval": fns.score_board(board, powers),
         "think_ms_total": think_ms_total,
         "think_ms_samples": think_samples,
@@ -863,6 +872,14 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
     total_undo_successes = sum(r.get("undo_successes", 0) for r in runs)
     undo_recovery_samples = [r.get("undo_avg_immediate_recovery", 0.0) for r in runs if r.get("undo_used", 0) > 0]
 
+    def _promoted(run: dict, threshold: int) -> bool:
+        key = f"promote_{threshold}"
+        if key in run:
+            return bool(run.get(key, False))
+        initial_second = int(run.get("initial_second_max_tile", 0) or 0)
+        peak_second = int(run.get("peak_second_max_tile", run.get("second_max_tile", 0)) or 0)
+        return initial_second < threshold <= peak_second
+
     score_ci = _bootstrap_mean_ci([r["score"] for r in runs], n_bootstrap=bootstrap_count)
     max_ci = _bootstrap_mean_ci([r["max_tile"] for r in runs], n_bootstrap=bootstrap_count)
     eval_ci = _bootstrap_mean_ci([r["final_eval"] for r in runs], n_bootstrap=bootstrap_count)
@@ -886,6 +903,9 @@ def _aggregate(runs: list[dict], bootstrap_count: int = DEFAULT_BOOTSTRAPS) -> d
         "peak_second_ge4096_pct": sum(1 for r in runs if r.get("peak_second_ge4096", False)) * 100.0 / n,
         "peak_second_ge8192_pct": sum(1 for r in runs if r.get("peak_second_ge8192", False)) * 100.0 / n,
         "promotion_stall_pct": sum(1 for r in runs if r.get("promotion_stalled", False)) * 100.0 / n,
+        "promote1024_pct": sum(1 for r in runs if _promoted(r, 1024)) * 100.0 / n,
+        "promote2048_pct": sum(1 for r in runs if _promoted(r, 2048)) * 100.0 / n,
+        "promote4096_pct": sum(1 for r in runs if _promoted(r, 4096)) * 100.0 / n,
         "avg_moves": total_moves / n,
         "avg_eval": sum(r["final_eval"] for r in runs) / n,
         "avg_think_ms": (sum(r["think_ms_total"] for r in runs) / max(1, total_moves)),
@@ -1020,6 +1040,8 @@ def evaluate_suite(
                     match = existing_row_by_key.get(key)
                     if match is None:
                         continue
+                    initial_second = int(match.get("initial_second_max_tile", 0))
+                    peak_second = int(match.get("peak_second_max_tile", match.get("second_max_tile", 0)))
                     results_by_key[public_key] = {
                         "moves": match["moves"],
                         "score": match["score"],
@@ -1035,12 +1057,15 @@ def evaluate_suite(
                         "second_ge8192": bool(match.get("second_ge8192", False)),
                         "peak_second_ge4096": bool(match.get("peak_second_ge4096", False)),
                         "peak_second_ge8192": bool(match.get("peak_second_ge8192", False)),
-                        "initial_second_max_tile": int(match.get("initial_second_max_tile", 0)),
+                        "initial_second_max_tile": initial_second,
                         "second_max_tile": int(match.get("second_max_tile", 0)),
-                        "peak_second_max_tile": int(match.get("peak_second_max_tile", match.get("second_max_tile", 0))),
+                        "peak_second_max_tile": peak_second,
                         "second_max_gain": int(match.get("second_max_gain", 0)),
                         "second_log_gain": float(match.get("second_log_gain", 0.0)),
                         "promotion_stalled": bool(match.get("promotion_stalled", False)),
+                        "promote_1024": bool(match.get("promote_1024", initial_second < 1024 <= peak_second)),
+                        "promote_2048": bool(match.get("promote_2048", initial_second < 2048 <= peak_second)),
+                        "promote_4096": bool(match.get("promote_4096", initial_second < 4096 <= peak_second)),
                         "final_eval": match["final_eval"],
                         "think_ms_total": match["think_ms_total"],
                         "think_ms_samples": match.get("think_ms_samples", []),
@@ -1244,6 +1269,9 @@ def _print_metric_glossary() -> None:
     print("  avg_second_max : average second-highest tile at end of run")
     print("  avg_second_gain: average change in second-highest tile from start to end")
     print("  promotion_stall% : % of runs where second-highest tile did not improve")
+    print("  promote1024% : % of runs that promoted second-highest tile from <1024 to >=1024")
+    print("  promote2048% : % of runs that promoted second-highest tile from <2048 to >=2048")
+    print("  promote4096% : % of runs that promoted second-highest tile from <4096 to >=4096")
     print("  second_ge4096% : % of runs where second-highest tile >= 4096")
     print("  second_ge8192% : % of runs where second-highest tile >= 8192")
     print("  peak_second_ge4096% : % of runs where second-highest tile reached >= 4096 at any step")
@@ -1262,7 +1290,7 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
     print(
         "| depth | avg_score | score_ci95 | avg_max | max_ci95 | survive% | reach2048% | "
         "reach4096% | reach8192% | reach16384% | avg_second_max | avg_second_gain | promotion_stall% | "
-        "second_ge4096% | second_ge8192% | peak_second_ge4096% | "
+        "promote1024% | promote2048% | promote4096% | second_ge4096% | second_ge8192% | peak_second_ge4096% | "
         "avg_moves | avg_eval | eval_ci95 | avg_think_ms | "
         "think_p50 | think_p90 | think_p99 | cache_hit_rate% | undo_used | undo_plan_gap_fp% | undo_success% |"
     )
@@ -1276,8 +1304,10 @@ def _print_summary_table(rows: list[dict], title: str) -> None:
             f"{r['survive_pct']:.1f} | {r['reach2048_pct']:.1f} | {r['reach4096_pct']:.1f} | "
             f"{r['reach8192_pct']:.1f} | {r.get('reach16384_pct', 0.0):.1f} | "
             f"{r.get('avg_second_max', 0.0):.1f} | {r.get('avg_second_gain', 0.0):.1f} | "
-            f"{r.get('promotion_stall_pct', 0.0):.1f} | {r.get('second_ge4096_pct', 0.0):.1f} | "
-            f"{r.get('second_ge8192_pct', 0.0):.1f} | {r.get('peak_second_ge4096_pct', 0.0):.1f} | "
+            f"{r.get('promotion_stall_pct', 0.0):.1f} | {r.get('promote1024_pct', 0.0):.1f} | "
+            f"{r.get('promote2048_pct', 0.0):.1f} | {r.get('promote4096_pct', 0.0):.1f} | "
+            f"{r.get('second_ge4096_pct', 0.0):.1f} | {r.get('second_ge8192_pct', 0.0):.1f} | "
+            f"{r.get('peak_second_ge4096_pct', 0.0):.1f} | "
             f"{r['avg_moves']:.1f} | {r['avg_eval']:.1f} | {eval_ci} | "
             f"{r['avg_think_ms']:.2f} | {r['think_p50_ms']:.2f} | {r['think_p90_ms']:.2f} | "
             f"{r['think_p99_ms']:.2f} | {r['cache_hit_rate_pct']:.1f} | "
@@ -1291,7 +1321,7 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
     print(
         "| fixture | avg_score | avg_max | survive% | reach2048% | "
         "reach4096% | reach8192% | reach16384% | avg_second_max | avg_second_gain | promotion_stall% | "
-        "second_ge4096% | second_ge8192% | peak_second_ge4096% | "
+        "promote1024% | promote2048% | promote4096% | second_ge4096% | second_ge8192% | peak_second_ge4096% | "
         "avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
         "action_mix(move/swap/delete/undo) | undo_plan_gap_fp% | undo_success% |"
     )
@@ -1303,7 +1333,9 @@ def _print_per_fixture(depth: int, stats: dict[str, dict]) -> None:
             f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
             f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
             f"{s.get('reach16384_pct', 0.0):.1f} | {s.get('avg_second_max', 0.0):.1f} | {s.get('avg_second_gain', 0.0):.1f} | "
-            f"{s.get('promotion_stall_pct', 0.0):.1f} | {s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
+            f"{s.get('promotion_stall_pct', 0.0):.1f} | {s.get('promote1024_pct', 0.0):.1f} | "
+            f"{s.get('promote2048_pct', 0.0):.1f} | {s.get('promote4096_pct', 0.0):.1f} | "
+            f"{s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
             f"{s.get('peak_second_ge4096_pct', 0.0):.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
             f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_plan_gap_false_positive_rate_pct', 0.0):.1f} | {s.get('undo_success_rate_pct', 0.0):.1f} |"
@@ -1315,7 +1347,7 @@ def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
     print(
         "| group | avg_score | avg_max | survive% | reach2048% | "
         "reach4096% | reach8192% | reach16384% | avg_second_max | avg_second_gain | promotion_stall% | "
-        "second_ge4096% | second_ge8192% | peak_second_ge4096% | "
+        "promote1024% | promote2048% | promote4096% | second_ge4096% | second_ge8192% | peak_second_ge4096% | "
         "avg_moves | avg_eval | think_p90 | cache_hit_rate% | "
         "action_mix(move/swap/delete/undo) | undo_plan_gap_fp% | undo_success% |"
     )
@@ -1327,7 +1359,9 @@ def _print_per_group(depth: int, stats: dict[str, dict]) -> None:
             f"| {name} | {s['avg_score']:.1f} | {s['avg_max']:.1f} | {s['survive_pct']:.1f} | "
             f"{s['reach2048_pct']:.1f} | {s['reach4096_pct']:.1f} | {s['reach8192_pct']:.1f} | "
             f"{s.get('reach16384_pct', 0.0):.1f} | {s.get('avg_second_max', 0.0):.1f} | {s.get('avg_second_gain', 0.0):.1f} | "
-            f"{s.get('promotion_stall_pct', 0.0):.1f} | {s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
+            f"{s.get('promotion_stall_pct', 0.0):.1f} | {s.get('promote1024_pct', 0.0):.1f} | "
+            f"{s.get('promote2048_pct', 0.0):.1f} | {s.get('promote4096_pct', 0.0):.1f} | "
+            f"{s.get('second_ge4096_pct', 0.0):.1f} | {s.get('second_ge8192_pct', 0.0):.1f} | "
             f"{s.get('peak_second_ge4096_pct', 0.0):.1f} | "
             f"{s['avg_moves']:.1f} | {s['avg_eval']:.1f} | {s['think_p90_ms']:.2f} | "
             f"{s['cache_hit_rate_pct']:.1f} | {mix} | {s.get('undo_plan_gap_false_positive_rate_pct', 0.0):.1f} | {s.get('undo_success_rate_pct', 0.0):.1f} |"

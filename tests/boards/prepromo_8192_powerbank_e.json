@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_powerbank_e",
+  "description": "8192 board with banked powers and a 512 pair, probing if tactical spend helps second-tile promotion.",
+  "board": [
+    [8192,  512, 512, 256],
+    [1024,  256, 128,  64],
+    [ 256,  128,  64,  32],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126200,
+  "powers": {"undo": 1, "swap": 1, "delete": 1}
+}

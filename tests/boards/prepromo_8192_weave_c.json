@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_weave_c",
+  "description": "Near-jammed 8192 weave where low tiles must be untangled before second-tile promotion.",
+  "board": [
+    [8192, 512, 256, 128],
+    [ 512, 256, 128,  64],
+    [ 256, 128,  64,  32],
+    [  16,   8,   0,   0]
+  ],
+  "score": 124500,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

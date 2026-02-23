@@ -24,6 +24,49 @@ evaluator = _load_evaluator_module()
 
 
 class TestEvaluatorHelpers(unittest.TestCase):
+    @staticmethod
+    def _make_run(
+        *,
+        max_tile: int,
+        initial_second_max_tile: int,
+        second_max_tile: int,
+        peak_second_max_tile: int | None = None,
+    ) -> dict:
+        peak = second_max_tile if peak_second_max_tile is None else peak_second_max_tile
+        second_gain = second_max_tile - initial_second_max_tile
+        return {
+            "moves": 10,
+            "actions": {"move": 10, "swap": 0, "delete": 0, "undo": 0},
+            "think_ms_samples": [1.0],
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "undo_used": 0,
+            "undo_early_used": 0,
+            "undo_plan_gap_only_used": 0,
+            "undo_plan_gap_false_positive_used": 0,
+            "undo_successes": 0,
+            "undo_avg_immediate_recovery": 0.0,
+            "score": 1000,
+            "max_tile": max_tile,
+            "second_max_tile": second_max_tile,
+            "initial_second_max_tile": initial_second_max_tile,
+            "peak_second_max_tile": peak,
+            "second_max_gain": second_gain,
+            "second_log_gain": 0.0,
+            "promotion_stalled": second_gain <= 0,
+            "reach2048": max_tile >= 2048,
+            "reach4096": max_tile >= 4096,
+            "reach8192": max_tile >= 8192,
+            "reach16384": max_tile >= 16384,
+            "second_ge4096": second_max_tile >= 4096,
+            "second_ge8192": second_max_tile >= 8192,
+            "peak_second_ge4096": peak >= 4096,
+            "peak_second_ge8192": peak >= 8192,
+            "survived_to_cap": True,
+            "final_eval": 123.0,
+            "think_ms_total": 10.0,
+        }
+
     def test_fixture_tags_cover_expected_groups(self) -> None:
         fixtures = [
             evaluator.Fixture(name="open", board=[[2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], score=0, powers={}),
@@ -125,8 +168,49 @@ class TestEvaluatorHelpers(unittest.TestCase):
         agg = evaluator._aggregate(runs, bootstrap_count=0)
         self.assertAlmostEqual(agg["avg_second_gain"], 2048.0, places=9)
         self.assertAlmostEqual(agg["promotion_stall_pct"], 0.0, places=9)
+        self.assertAlmostEqual(agg["promote1024_pct"], 0.0, places=9)
+        self.assertAlmostEqual(agg["promote2048_pct"], 0.0, places=9)
+        self.assertAlmostEqual(agg["promote4096_pct"], 100.0, places=9)
         self.assertAlmostEqual(agg["peak_second_ge4096_pct"], 100.0, places=9)
         self.assertAlmostEqual(agg["undo_plan_gap_false_positive_rate_pct"], 50.0, places=9)
+
+    def test_promote_metrics_no_credit_for_static_threshold_tile(self) -> None:
+        # A threshold tile exists (as max tile), but second-highest never crosses
+        # the threshold during the run, so no promotion credit should be given.
+        cases = [
+            (1024, 512, "promote1024_pct"),
+            (2048, 1024, "promote2048_pct"),
+            (4096, 2048, "promote4096_pct"),
+        ]
+        for max_tile, second_tile, metric_key in cases:
+            with self.subTest(metric=metric_key):
+                run = self._make_run(
+                    max_tile=max_tile,
+                    initial_second_max_tile=second_tile,
+                    second_max_tile=second_tile,
+                    peak_second_max_tile=second_tile,
+                )
+                agg = evaluator._aggregate([run], bootstrap_count=0)
+                self.assertAlmostEqual(agg[metric_key], 0.0, places=9)
+
+    def test_promote_metrics_credit_active_crossing_with_existing_tile(self) -> None:
+        # A threshold tile already exists (as max tile), and the policy creates
+        # another one so second-highest crosses the threshold during gameplay.
+        cases = [
+            (1024, 512, "promote1024_pct"),
+            (2048, 1024, "promote2048_pct"),
+            (4096, 2048, "promote4096_pct"),
+        ]
+        for threshold, initial_second, metric_key in cases:
+            with self.subTest(metric=metric_key):
+                run = self._make_run(
+                    max_tile=threshold,
+                    initial_second_max_tile=initial_second,
+                    second_max_tile=threshold,
+                    peak_second_max_tile=threshold,
+                )
+                agg = evaluator._aggregate([run], bootstrap_count=0)
+                self.assertAlmostEqual(agg[metric_key], 100.0, places=9)
 
 
 if __name__ == "__main__":

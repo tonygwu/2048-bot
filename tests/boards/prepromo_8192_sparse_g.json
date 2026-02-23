@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_sparse_g",
+  "description": "Open 8192 board with separated 1024/512 clusters, requiring multiple setup moves before promotion.",
+  "board": [
+    [8192,  512, 256, 128],
+    [ 256,  128,  64,  32],
+    [1024,  512, 256, 128],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126300,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_ladder_a",
+  "description": "8192 anchor with a 1024 ladder and open space; intended to test second-tile promotion pressure.",
+  "board": [
+    [8192, 1024,  512, 256],
+    [ 512,  256,  128,  64],
+    [ 256,  128,   64,  32],
+    [   0,    0,    0,   0]
+  ],
+  "score": 126000,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}
