@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_powerbank_n",
+  "description": "8192 board with full tactical power bank and 1024 runway; checks whether policy spends powers to accelerate promotion.",
+  "board": [
+    [8192, 1024, 512, 256],
+    [ 512,  256, 128,  64],
+    [ 256,  128,  64,  32],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126400,
+  "powers": {"undo": 1, "swap": 1, "delete": 1}
+}

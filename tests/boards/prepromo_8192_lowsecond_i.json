@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_lowsecond_i",
+  "description": "8192 board with staggered 512 cluster and no 1024 runner-up at start; tests early promotion setup quality.",
+  "board": [
+    [8192, 256, 512, 128],
+    [ 512, 256, 128,  64],
+    [ 256, 128,  64,  32],
+    [   0,   0,   0,   0]
+  ],
+  "score": 125700,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

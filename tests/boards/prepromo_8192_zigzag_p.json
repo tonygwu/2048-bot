@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_zigzag_p",
+  "description": "Zigzag staircase with dual 1024 feeders and limited mobility; encourages multi-move setup before promotion.",
+  "board": [
+    [8192,  512, 1024, 256],
+    [ 256, 1024,  512, 128],
+    [ 128,  256,  128,  64],
+    [   0,    0,    0,   0]
+  ],
+  "score": 126350,
+  "powers": {"undo": 0, "swap": 0, "delete": 1}
+}

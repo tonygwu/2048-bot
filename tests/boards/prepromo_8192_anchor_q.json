@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_anchor_q",
+  "description": "Corner-anchored 8192 with a distant 1024 chain and sparse pocket; tests late-game conversion discipline.",
+  "board": [
+    [8192, 2048,  512, 256],
+    [1024,  512,  256, 128],
+    [ 256,  128,   64,   0],
+    [   0,    0,    0,   0]
+  ],
+  "score": 126500,
+  "powers": {"undo": 1, "swap": 0, "delete": 0}
+}

@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_funnel_l",
+  "description": "Near-jammed funnel into the 8192 corner; tactical move quality determines whether promotions remain possible.",
+  "board": [
+    [8192, 1024, 512, 256],
+    [ 256,  512, 256, 128],
+    [ 128,  256, 128,  64],
+    [  16,    8,   0,   0]
+  ],
+  "score": 126500,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

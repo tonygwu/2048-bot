@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_split_lanes_j",
+  "description": "Dual 1024 lanes beneath 8192 anchor; should reward consolidation toward a stable 2048 runner-up.",
+  "board": [
+    [8192, 1024, 512, 256],
+    [ 512, 1024, 256, 128],
+    [ 256,  512, 128,  64],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126200,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

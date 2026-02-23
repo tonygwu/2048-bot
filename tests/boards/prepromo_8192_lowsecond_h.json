@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_lowsecond_h",
+  "description": "8192 anchor with runner-up only 512 and open ladder; intended to exercise 512->1024->2048 promotion.",
+  "board": [
+    [8192, 512, 256, 128],
+    [ 512, 256, 128,  64],
+    [ 256, 128,  64,  32],
+    [   0,   0,   0,   0]
+  ],
+  "score": 125800,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}

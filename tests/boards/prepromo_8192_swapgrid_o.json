@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_swapgrid_o",
+  "description": "Checkerboard pressure around an 8192 anchor; requires careful lane setup to promote new 1024/2048 tiles.",
+  "board": [
+    [8192, 1024,  512, 256],
+    [1024,  512,  256, 128],
+    [ 512,  256,  128,  64],
+    [   0,    0,    0,   0]
+  ],
+  "score": 126250,
+  "powers": {"undo": 0, "swap": 1, "delete": 0}
+}

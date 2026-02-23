@@ -1,0 +1,12 @@
+{
+  "name": "prepromo_8192_stagger_chain_k",
+  "description": "Staggered 1024 and 512 chains with open tail; tests whether search can preserve merge runway over many steps.",
+  "board": [
+    [8192, 1024, 512, 256],
+    [ 512,  256, 128,  64],
+    [1024,  512, 256, 128],
+    [   0,    0,   0,   0]
+  ],
+  "score": 126100,
+  "powers": {"undo": 0, "swap": 0, "delete": 0}
+}
