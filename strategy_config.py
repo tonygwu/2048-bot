@@ -5,13 +5,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class DepthPolicy:
-    min_depth: int = 5
+    min_depth: int = 3
     max_depth: int = 5
     soft_max: int = 5
-    # Cap auto-depth at 5 to avoid late-game depth-6 latency spikes.
-    base: float = 1.10
+    # Keep auto-depth in the 3-5 band: default to lower depth in calmer boards,
+    # while still allowing 5 in jammed/late states.
+    base: float = 0.80
     w_max: float = 0.20
-    w_full: float = 0.95
+    w_full: float = 0.90
     w_blocked: float = 0.65
     w_rough: float = 0.35
     rough_norm_divisor: float = 36.0
