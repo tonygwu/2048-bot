@@ -39,13 +39,11 @@ def _best_swap_exhaustive(
 
 
 class TestSwapPolicy(unittest.TestCase):
-    def test_live_board_prefers_low_tile_rescue_swap(self) -> None:
+    def test_live_board_prefers_move_over_optional_swap(self) -> None:
         board, powers = _load_board("swap_low_tile_live_rescue")
         action = best_action(board, powers, depth=3)
         self.assertIsNotNone(action)
-        self.assertEqual(action[0], "swap")
-        _, r1, c1, r2, c2 = action
-        self.assertEqual({(r1, c1), (r2, c2)}, {(0, 2), (2, 0)})
+        self.assertEqual(action[0], "move")
 
     def test_no_move_board_chooses_low_tile_rescue_swap(self) -> None:
         board, powers = _load_board("swap_low_tile_rescue")

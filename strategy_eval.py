@@ -13,15 +13,25 @@ from transposition_cache import TranspositionCache
 
 # Bump this string whenever heuristic weights or eval logic changes.
 # The SQLite cache stores scores per-version; stale entries are ignored.
-SCORE_BOARD_VERSION = "1.5"
+SCORE_BOARD_VERSION = "1.7"
 
 _TRANS_CAP = 500_000
 _TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
 
 
+def _normalize_trans_key(key) -> int:
+    """Normalize persisted cache keys across legacy/new shapes to board-only."""
+    if isinstance(key, int):
+        return int(key)
+    if isinstance(key, tuple) and len(key) >= 1:
+        return int(key[0])
+    raise ValueError(f"unexpected transposition key shape: {key!r}")
+
+
 def load_trans_table(entries: dict) -> None:
     """Bulk-load pre-computed entries into the transposition cache."""
-    _TRANS_CACHE.load(entries)
+    normalized = {_normalize_trans_key(k): float(v) for k, v in entries.items()}
+    _TRANS_CACHE.load(normalized)
 
 
 def drain_new_entries() -> dict:
@@ -269,27 +279,61 @@ def _powerup_value(board: list[list[int]], max_tile: int, powers: dict) -> float
     if not powers or max_tile <= 0:
         return 0.0
 
+    def _bank_value(
+        uses: int,
+        prox_fraction: float,
+        one_use_value: float,
+        two_use_value: float,
+        max_uses: int,
+    ) -> float:
+        """Piecewise power-bank value with fractional progress to next charge."""
+        uses_c = max(0, min(max_uses, int(uses)))
+        prox_c = max(0.0, min(1.0, float(prox_fraction)))
+        if max_uses <= 0:
+            return 0.0
+        if uses_c >= max_uses:
+            return two_use_value
+        if uses_c <= 0:
+            return prox_c * one_use_value
+        # uses_c == 1 for current game semantics.
+        return one_use_value + prox_c * (two_use_value - one_use_value)
+
     stage = math.log2(max_tile)
     p = DEFAULT_POWERUP_POLICY
     norm = normalize_powers(powers)
+    undo_uses = min(norm["undo"], p.max_undo_uses)
     swap_uses = min(norm["swap"], p.max_swap_uses)
     delete_uses = min(norm["delete"], p.max_delete_uses)
 
+    prox_undo = 0.0
     prox_swap = 0.0
     prox_delete = 0.0
+    if max_tile >= p.undo_prox_min_tile and undo_uses < p.max_undo_uses:
+        prox_undo = p.prox_scale * _proximity_to_next_unlock(board, p.undo_unlock_tile)
     if max_tile >= p.prox_swap_min_tile and swap_uses < p.max_swap_uses:
         prox_swap = p.prox_scale * _proximity_to_next_unlock(board, p.swap_unlock_tile)
     if max_tile >= p.prox_delete_min_tile and delete_uses < p.max_delete_uses:
         prox_delete = p.prox_scale * _proximity_to_next_unlock(board, p.delete_unlock_tile)
 
-    effective_swaps = swap_uses + prox_swap
-    effective_deletes = delete_uses + prox_delete
-    value_per_swap = p.w_base * stage
-    value_per_delete = p.w_base * stage * p.delete_scale
-    return value_per_swap * effective_swaps + value_per_delete * effective_deletes
+    undo_one = p.undo_value_one_stage_mult * stage
+    undo_two = p.undo_value_two_stage_mult * stage
+    swap_one = p.swap_value_one_stage_mult * stage
+    swap_two = p.swap_value_two_stage_mult * stage
+    delete_one = p.delete_value_one_stage_mult * stage
+    delete_two = p.delete_value_two_stage_mult * stage
+    return (
+        _bank_value(undo_uses, prox_undo, undo_one, undo_two, p.max_undo_uses)
+        + _bank_value(swap_uses, prox_swap, swap_one, swap_two, p.max_swap_uses)
+        + _bank_value(delete_uses, prox_delete, delete_one, delete_two, p.max_delete_uses)
+    )
 
 
-def extract_eval_features(board: list[list[int]], powers: dict | None = None) -> EvalFeatures:
+def extract_eval_features(
+    board: list[list[int]],
+    powers: dict | None = None,
+    *,
+    include_powerups: bool = True,
+) -> EvalFeatures:
     powers = normalize_powers(powers)
     empties = sum(1 for r in range(4) for c in range(4) if board[r][c] == 0)
     tiles = sorted((board[r][c] for r in range(4) for c in range(4)), reverse=True)
@@ -320,7 +364,7 @@ def extract_eval_features(board: list[list[int]], powers: dict | None = None) ->
         sum_log=math.log2(tile_sum + 1.0),
         legal_moves=_legal_move_count(board),
         corner_max_log=corner_max_log,
-        powerup_value=_powerup_value(board, max_val, powers),
+        powerup_value=_powerup_value(board, max_val, powers) if include_powerups else 0.0,
         promotion_progress=promotion_progress,
         high_merge_potential=_high_merge_potential(board, max_val),
     )
@@ -350,10 +394,11 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     `populate_cache.py --recompute` so SQLite contains scores for the new version.
     """
     powers = normalize_powers(powers)
-    key = (board_to_bb(board), powers["swap"], powers["delete"])
-    cached = _TRANS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    result = score_from_features(extract_eval_features(board, powers))
-    _TRANS_CACHE.store(key, result)
-    return result
+    board_key = board_to_bb(board)
+    base_score = _TRANS_CACHE.get(board_key)
+    if base_score is None:
+        base_score = score_from_features(extract_eval_features(board, powers, include_powerups=False))
+        _TRANS_CACHE.store(board_key, base_score)
+    max_tile = max(board[r][c] for r in range(4) for c in range(4))
+    dynamic_power = DEFAULT_EVAL_WEIGHTS.powerup * _powerup_value(board, max_tile, powers)
+    return base_score + dynamic_power

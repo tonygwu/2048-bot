@@ -32,12 +32,16 @@ class TestDeletePolicy(unittest.TestCase):
         cands = _delete_candidates(board, empties=1, max_tile=4096)
         self.assertNotIn(4096, cands)
 
-    def test_best_action_uses_singleton_delete_regressions(self) -> None:
+    def test_best_action_prefers_move_over_singleton_delete_candidates(self) -> None:
         board_128, powers_128 = _load_board("delete_singleton_128_blocker")
-        self.assertEqual(best_action(board_128, powers_128, depth=4), ("delete", 128, 2, 2))
+        action_128 = best_action(board_128, powers_128, depth=4)
+        self.assertIsNotNone(action_128)
+        self.assertEqual(action_128[0], "move")
 
         board_256, powers_256 = _load_board("delete_singleton_256_blocker")
-        self.assertEqual(best_action(board_256, powers_256, depth=4), ("delete", 256, 1, 1))
+        action_256 = best_action(board_256, powers_256, depth=4)
+        self.assertIsNotNone(action_256)
+        self.assertEqual(action_256[0], "move")
 
     def test_sparse_8192_delete_trap_can_prefer_non_delete(self) -> None:
         board, powers = _load_board("promotion_8192_delete_undo_trap_b")

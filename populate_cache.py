@@ -84,13 +84,12 @@ def _is_game_over(board: list[list[int]]) -> bool:
 
 # ── Recompute mode ────────────────────────────────────────────────────────────
 
-def _score_state(task: tuple[int, int, int]) -> tuple[tuple[int, int, int], float]:
-    """Worker helper: score one (board_bb, swap_uses, delete_uses) state."""
-    bb, su, du = task
+def _score_state(task: int) -> tuple[int, float]:
+    """Worker helper: score one board_bb state."""
+    bb = int(task)
     board = db.decode_board(bb)
-    powers = {"swap": su, "delete": du}
-    score = score_board(board, powers)
-    key = (board_to_bb(board), su, du)
+    score = score_board(board, {})
+    key = board_to_bb(board)
     return key, score
 
 
@@ -147,7 +146,7 @@ def cmd_recompute(
 
     t0 = time.perf_counter()
     written_total = 0
-    entries: dict[tuple[int, int, int], float] = {}
+    entries: dict[int, float] = {}
     if workers == 1:
         iterator = (_score_state(task) for task in tasks)
     else:

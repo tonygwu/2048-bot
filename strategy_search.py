@@ -58,7 +58,14 @@ def _search_cache_store(key, value: float) -> None:
 
 
 def _search_key(board: list[list[int]], powers: dict, depth: int, is_max: bool) -> tuple:
-    return (board_to_bb(board), powers["swap"], powers["delete"], depth, 1 if is_max else 0)
+    return (
+        board_to_bb(board),
+        powers["undo"],
+        powers["swap"],
+        powers["delete"],
+        depth,
+        1 if is_max else 0,
+    )
 
 
 def auto_depth(board: list[list[int]]) -> int:
@@ -292,6 +299,12 @@ def _required_powerup_advantage(board: list[list[int]], uses_left: int, kind: st
         elif max_tile >= p.late_stage_tile_threshold:
             stage_factor = p.late_stage_margin_mult
     required = (base_margin + reserve_margin) * mult * stage_factor
+    # Preserve the final charge unless the tactical gain is clear. The reserve
+    # relaxes on jammed boards where immediate intervention is more valuable.
+    if uses_left <= 1:
+        last_use_margin = p.last_use_margin_calm * (1.0 - pressure) + p.last_use_margin_pressure * pressure
+        last_use_mult = p.last_use_swap_mult if kind == "swap" else p.last_use_delete_mult
+        required += last_use_margin * last_use_mult
     # Delete-specific patience: in sparse ultra-late boards, avoid spending a
     # delete on small clutter unless it strongly outperforms normal moves.
     if kind == "delete" and max_tile >= p.delete_patience_min_tile and empties >= p.delete_patience_min_empties:

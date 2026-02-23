@@ -3,9 +3,9 @@ cache.py — SQLite persistence for the score_board transposition table.
 
 Database: cache/transposition.db
 Schema:
-  entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER,
-          version TEXT, score REAL,
-          PRIMARY KEY (board_bb, swap_uses, delete_uses, version))
+  entries(board_bb INTEGER, undo_uses INTEGER, swap_uses INTEGER,
+          delete_uses INTEGER, version TEXT, score REAL,
+          PRIMARY KEY (board_bb, undo_uses, swap_uses, delete_uses, version))
 
 board_bb is a 64-bit value that can exceed Python's sqlite3 signed-int limit
 (2^63 − 1) for late-game boards.  We store it as a signed int64 using
@@ -56,17 +56,18 @@ _SCHEMA_READY = False
 _CREATE_ENTRIES_SQL = """
     CREATE TABLE IF NOT EXISTS entries (
         board_bb    INTEGER NOT NULL,
+        undo_uses   INTEGER NOT NULL,
         swap_uses   INTEGER NOT NULL,
         delete_uses INTEGER NOT NULL,
         version     TEXT    NOT NULL,
         score       REAL    NOT NULL,
-        PRIMARY KEY (board_bb, swap_uses, delete_uses, version)
+        PRIMARY KEY (board_bb, undo_uses, swap_uses, delete_uses, version)
     )
 """
 _CREATE_VERSION_INDEX_SQL = "CREATE INDEX IF NOT EXISTS idx_version ON entries(version)"
 _CREATE_VERSION_KEY_INDEX_SQL = (
-    "CREATE INDEX IF NOT EXISTS idx_version_board_power "
-    "ON entries(version, board_bb, swap_uses, delete_uses)"
+    "CREATE INDEX IF NOT EXISTS idx_version_board_power_undo "
+    "ON entries(version, board_bb, undo_uses, swap_uses, delete_uses)"
 )
 
 
@@ -150,6 +151,64 @@ def _connect_ro() -> sqlite3.Connection:
     )
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return bool(row)
+
+
+def _entries_table_info(conn: sqlite3.Connection) -> tuple[list[str], list[str]]:
+    rows = conn.execute("PRAGMA table_info(entries)").fetchall()
+    cols = [str(r[1]) for r in rows]
+    pk_cols = [str(r[1]) for r in sorted((r for r in rows if int(r[5]) > 0), key=lambda r: int(r[5]))]
+    return cols, pk_cols
+
+
+def _migrate_entries_schema_if_needed(conn: sqlite3.Connection) -> None:
+    """Best-effort in-place migration for legacy `entries` schemas.
+
+    For board-only caching we only persist canonical zero-power rows
+    (undo_uses=swap_uses=delete_uses=0), so we avoid expensive table rewrites.
+    Legacy DBs that predate undo support only need a new `undo_uses` column.
+    """
+    if not _table_exists(conn, "entries"):
+        return
+
+    cols, _ = _entries_table_info(conn)
+    col_set = set(cols)
+
+    if "undo_uses" not in col_set:
+        conn.execute("ALTER TABLE entries ADD COLUMN undo_uses INTEGER NOT NULL DEFAULT 0")
+        cols, _ = _entries_table_info(conn)
+        col_set = set(cols)
+
+    required_cols = {"board_bb", "undo_uses", "swap_uses", "delete_uses", "version", "score"}
+    if required_cols.issubset(col_set):
+        return
+
+    # Unexpected/partial shape fallback: rebuild table into canonical schema.
+    conn.execute("ALTER TABLE entries RENAME TO entries_legacy")
+    conn.execute(_CREATE_ENTRIES_SQL)
+
+    legacy_rows = conn.execute("PRAGMA table_info(entries_legacy)").fetchall()
+    legacy_set = {str(r[1]) for r in legacy_rows}
+    if "undo_uses" in legacy_set:
+        conn.execute(
+            "INSERT INTO entries (board_bb, undo_uses, swap_uses, delete_uses, version, score) "
+            "SELECT board_bb, undo_uses, swap_uses, delete_uses, version, score "
+            "FROM entries_legacy"
+        )
+    else:
+        conn.execute(
+            "INSERT INTO entries (board_bb, undo_uses, swap_uses, delete_uses, version, score) "
+            "SELECT board_bb, 0, swap_uses, delete_uses, version, score "
+            "FROM entries_legacy"
+        )
+    conn.execute("DROP TABLE entries_legacy")
+
+
 def init_db() -> None:
     """Initialize schema and connection mode once per process."""
     global _SCHEMA_READY
@@ -159,6 +218,7 @@ def init_db() -> None:
     try:
         _set_rw_pragmas(conn)
         conn.execute(_CREATE_ENTRIES_SQL)
+        _migrate_entries_schema_if_needed(conn)
         conn.execute(_CREATE_VERSION_INDEX_SQL)
         conn.execute(_CREATE_VERSION_KEY_INDEX_SQL)
         conn.commit()
@@ -176,7 +236,8 @@ def load_version(
     total_rows: int | None = None,
 ) -> dict:
     """Load all cached entries for *version* into a dict keyed by
-    (board_bb, swap_uses, delete_uses) → score.  Returns {} if DB is absent.
+    board_bb → score.
+    Returns {} if DB is absent.
 
     progress_cb receives (loaded_rows, total_rows) after each batch.
     """
@@ -186,28 +247,50 @@ def load_version(
     conn = _connect_ro()
     try:
         _set_common_pragmas(conn)
+        use_legacy_shape = False
         try:
             if total_rows is None:
                 total_rows = conn.execute(
-                    "SELECT COUNT(*) FROM entries WHERE version = ?",
+                    "SELECT COUNT(*) FROM entries "
+                    "WHERE version = ? AND undo_uses = 0 AND swap_uses = 0 AND delete_uses = 0",
                     (version,),
                 ).fetchone()[0]
             cur = conn.execute(
-                "SELECT board_bb, swap_uses, delete_uses, score FROM entries WHERE version = ?",
+                "SELECT board_bb, undo_uses, swap_uses, delete_uses, score "
+                "FROM entries WHERE version = ?",
                 (version,),
             )
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return {}
-            raise
+            if "no such column" in str(exc).lower() and "undo_uses" in str(exc).lower():
+                use_legacy_shape = True
+                if total_rows is None:
+                    total_rows = conn.execute(
+                        "SELECT COUNT(*) FROM entries "
+                        "WHERE version = ? AND swap_uses = 0 AND delete_uses = 0",
+                        (version,),
+                    ).fetchone()[0]
+                cur = conn.execute(
+                    "SELECT board_bb, swap_uses, delete_uses, score FROM entries WHERE version = ?",
+                    (version,),
+                )
+            else:
+                raise
         loaded = 0
-        out: dict[tuple[int, int, int], float] = {}
+        out: dict[int, float] = {}
         while True:
             rows = cur.fetchmany(batch)
             if not rows:
                 break
-            for bb, su, du, score in rows:
-                out[(_from_signed(bb), su, du)] = score
+            if use_legacy_shape:
+                for bb, su, du, score in rows:
+                    if su == 0 and du == 0:
+                        out[_from_signed(bb)] = score
+            else:
+                for bb, uu, su, du, score in rows:
+                    if uu == 0 and su == 0 and du == 0:
+                        out[_from_signed(bb)] = score
             loaded += len(rows)
             if progress_cb is not None:
                 try:
@@ -304,7 +387,7 @@ def save_entries(
     batch_size: int = 100_000,
 ) -> int:
     """Insert-or-replace *entries* into the DB under *version*.
-    entries: {(board_bb, swap_uses, delete_uses): score}
+    entries: {board_bb: score} (tuple keys are accepted and reduced to board_bb).
     Returns the number of rows written."""
     if not entries:
         return 0
@@ -317,9 +400,19 @@ def save_entries(
     conn = _connect_rw()
     try:
         _set_rw_pragmas(conn)
+        board_scores: dict[int, float] = {}
+        for key, score in entries.items():
+            if isinstance(key, int):
+                bb = key
+            elif isinstance(key, tuple) and len(key) >= 1:
+                bb = key[0]
+            else:
+                raise ValueError(f"unexpected cache entry key shape: {key!r}")
+            board_scores[int(bb)] = float(score)
+
         rows = [
-            (_to_signed(bb), _clamp_uses(su), _clamp_uses(du), version, score)
-            for (bb, su, du), score in entries.items()
+            (_to_signed(bb), _clamp_uses(0), _clamp_uses(0), _clamp_uses(0), version, score)
+            for bb, score in board_scores.items()
         ]
         total = len(rows)
         step = max(1, int(batch_size))
@@ -328,7 +421,7 @@ def save_entries(
             chunk = rows[i:i + step]
             conn.executemany(
                 "INSERT OR REPLACE INTO entries "
-                "(board_bb, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?)",
+                "(board_bb, undo_uses, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?,?)",
                 chunk,
             )
             written += len(chunk)
@@ -352,43 +445,70 @@ def list_versions() -> dict:
         _set_common_pragmas(conn)
         try:
             rows = conn.execute(
-                "SELECT version, COUNT(*) FROM entries GROUP BY version"
+                "SELECT version, COUNT(*) FROM entries "
+                "WHERE undo_uses = 0 AND swap_uses = 0 AND delete_uses = 0 "
+                "GROUP BY version"
             ).fetchall()
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return {}
-            raise
+            if "no such column" in str(exc).lower() and "undo_uses" in str(exc).lower():
+                rows = conn.execute(
+                    "SELECT version, COUNT(*) FROM entries "
+                    "WHERE swap_uses = 0 AND delete_uses = 0 "
+                    "GROUP BY version"
+                ).fetchall()
+            else:
+                raise
     finally:
         conn.close()
     return {v: cnt for v, cnt in rows}
 
 
 def get_all_states(version: str | None = None) -> list[tuple]:
-    """Return raw rows as (board_bb_unsigned, swap_uses, delete_uses, version, score).
+    """Return raw rows as
+    (board_bb_unsigned, version, score) for canonical zero-power cache rows.
     If version is None, return all versions."""
     if not os.path.exists(DB_PATH):
         return []
     conn = _connect_ro()
     try:
         _set_common_pragmas(conn)
+        use_legacy_shape = False
         try:
             if version is not None:
                 rows = conn.execute(
-                    "SELECT board_bb, swap_uses, delete_uses, version, score "
+                    "SELECT board_bb, undo_uses, swap_uses, delete_uses, version, score "
                     "FROM entries WHERE version = ?",
                     (version,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT board_bb, swap_uses, delete_uses, version, score FROM entries"
+                    "SELECT board_bb, undo_uses, swap_uses, delete_uses, version, score "
+                    "FROM entries"
                 ).fetchall()
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
                 return []
-            raise
+            if "no such column" in str(exc).lower() and "undo_uses" in str(exc).lower():
+                use_legacy_shape = True
+                if version is not None:
+                    rows = conn.execute(
+                        "SELECT board_bb, swap_uses, delete_uses, version, score "
+                        "FROM entries WHERE version = ?",
+                        (version,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT board_bb, swap_uses, delete_uses, version, score FROM entries"
+                    ).fetchall()
+            else:
+                raise
     finally:
         conn.close()
-    return [(_from_signed(bb), su, du, v, sc) for bb, su, du, v, sc in rows]
+    if use_legacy_shape:
+        return [(_from_signed(bb), v, sc) for bb, su, du, v, sc in rows if su == 0 and du == 0]
+    return [(_from_signed(bb), v, sc) for bb, uu, su, du, v, sc in rows if uu == 0 and su == 0 and du == 0]
 
 
 def get_recompute_states(
@@ -397,8 +517,8 @@ def get_recompute_states(
     limit: int | None = None,
     offset: int = 0,
     order_by_max_tile: str | None = None,
-) -> list[tuple[int, int, int]]:
-    """Return unique (board_bb_unsigned, swap_uses, delete_uses) states for recompute.
+) -> list[int]:
+    """Return unique board_bb_unsigned states.
 
     If only_missing_current=True, return only states that do not yet have a row in
     current_version. Results are ordered deterministically by key unless
@@ -408,7 +528,6 @@ def get_recompute_states(
     if not os.path.exists(DB_PATH):
         return []
 
-    init_db()
     lim = None if limit is None else max(0, int(limit))
     off = max(0, int(offset))
     order_norm = None if order_by_max_tile is None else str(order_by_max_tile).strip().lower()
@@ -419,36 +538,39 @@ def get_recompute_states(
         _set_common_pragmas(conn)
         if order_norm is not None:
             conn.create_function("bb_max_exp", 1, _bb_max_exp_from_signed_sql)
-        if only_missing_current:
-            sql = """
-                SELECT e.board_bb, e.swap_uses, e.delete_uses
-                FROM entries e
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM entries cur
-                    WHERE cur.version = ?
-                      AND cur.board_bb = e.board_bb
-                      AND cur.swap_uses = e.swap_uses
-                      AND cur.delete_uses = e.delete_uses
-                )
-                GROUP BY e.board_bb, e.swap_uses, e.delete_uses
-            """
-            params: list = [current_version]
-        else:
-            sql = """
-                SELECT e.board_bb, e.swap_uses, e.delete_uses
-                FROM entries e
-                GROUP BY e.board_bb, e.swap_uses, e.delete_uses
-            """
-            params = []
+        try:
+            if only_missing_current:
+                sql = """
+                    SELECT e.board_bb
+                    FROM entries e
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM entries cur
+                        WHERE cur.version = ?
+                          AND cur.board_bb = e.board_bb
+                          AND cur.undo_uses = 0
+                          AND cur.swap_uses = 0
+                          AND cur.delete_uses = 0
+                    )
+                    GROUP BY e.board_bb
+                """
+                params: list = [current_version]
+            else:
+                sql = """
+                    SELECT e.board_bb
+                    FROM entries e
+                    GROUP BY e.board_bb
+                """
+                params = []
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return []
+            raise
 
         if order_norm is None:
-            sql += "\n ORDER BY e.board_bb, e.swap_uses, e.delete_uses"
+            sql += "\n ORDER BY e.board_bb"
         else:
-            sql += (
-                f"\n ORDER BY bb_max_exp(e.board_bb) {order_norm.upper()}, "
-                "e.board_bb, e.swap_uses, e.delete_uses"
-            )
+            sql += f"\n ORDER BY bb_max_exp(e.board_bb) {order_norm.upper()}, e.board_bb"
 
         if lim is not None:
             sql += " LIMIT ? OFFSET ?"
@@ -457,11 +579,46 @@ def get_recompute_states(
             sql += " LIMIT -1 OFFSET ?"
             params.append(off)
 
-        rows = conn.execute(sql, tuple(params)).fetchall()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return []
+            if "no such column" in str(exc).lower() and "undo_uses" in str(exc).lower():
+                if only_missing_current:
+                    sql = """
+                        SELECT e.board_bb
+                        FROM entries e
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM entries cur
+                            WHERE cur.version = ?
+                              AND cur.board_bb = e.board_bb
+                              AND cur.swap_uses = 0
+                              AND cur.delete_uses = 0
+                        )
+                        GROUP BY e.board_bb
+                    """
+                    params = [current_version]
+                else:
+                    sql = "SELECT e.board_bb FROM entries e GROUP BY e.board_bb"
+
+                if order_norm is None:
+                    sql += "\n ORDER BY e.board_bb"
+                else:
+                    sql += f"\n ORDER BY bb_max_exp(e.board_bb) {order_norm.upper()}, e.board_bb"
+                if lim is not None:
+                    sql += " LIMIT ? OFFSET ?"
+                    params.extend([lim, off])
+                elif off > 0:
+                    sql += " LIMIT -1 OFFSET ?"
+                    params.append(off)
+                rows = conn.execute(sql, tuple(params)).fetchall()
+            else:
+                raise
     finally:
         conn.close()
-
-    return [(_from_signed(bb), su, du) for bb, su, du in rows]
+    return [_from_signed(int(row[0])) for row in rows]
 
 
 def decode_board(bb: int) -> list[list[int]]:

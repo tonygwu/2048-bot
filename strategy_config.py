@@ -62,8 +62,17 @@ class EvalWeights:
 class PowerUpPolicy:
     w_base: float = 40.0
     delete_scale: float = 2.0
+    max_undo_uses: int = 2
     max_swap_uses: int = 2
     max_delete_uses: int = 2
+    # Score-board bank values (multiplied by stage=log2(max_tile)).
+    # Two uses are intentionally sublinear vs one use.
+    undo_value_one_stage_mult: float = 40.0
+    undo_value_two_stage_mult: float = 70.0
+    swap_value_one_stage_mult: float = 80.0
+    swap_value_two_stage_mult: float = 140.0
+    delete_value_one_stage_mult: float = 160.0
+    delete_value_two_stage_mult: float = 280.0
     swap_unlock_tile: int = 256
     delete_unlock_tile: int = 512
     prox_scale: float = 0.25
@@ -74,6 +83,13 @@ class PowerUpPolicy:
     spend_margin_calm: float = 130.0
     spend_margin_pressure: float = 30.0
     reserve_margin_per_extra_use: float = 30.0
+    # Final-charge reserve: keep the last swap/delete banked unless the gain is
+    # clearly superior. Relax in high-pressure boards where tactical spend is
+    # often required to survive.
+    last_use_margin_calm: float = 150.0
+    last_use_margin_pressure: float = 55.0
+    last_use_swap_mult: float = 1.0
+    last_use_delete_mult: float = 0.25
     pressure_fullness_w: float = 0.45
     pressure_mobility_w: float = 0.45
     pressure_roughness_w: float = 0.10

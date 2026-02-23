@@ -17,6 +17,7 @@ from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells, is_g
 from strategy_eval import (
     SCORE_BOARD_VERSION,
     _monotonicity,
+    _powerup_value,
     _roughness,
     extract_eval_features,
     normalize_powers,
@@ -32,8 +33,18 @@ _EVAL_WEIGHTS = replace(
 _TRANS_CACHE = TranspositionCache(cap=500_000)
 
 
+def _normalize_trans_key(key) -> int:
+    """Normalize persisted cache keys across legacy/new shapes to board-only."""
+    if isinstance(key, int):
+        return int(key)
+    if isinstance(key, tuple) and len(key) >= 1:
+        return int(key[0])
+    raise ValueError(f"unexpected transposition key shape: {key!r}")
+
+
 def load_trans_table(entries: dict) -> None:
-    _TRANS_CACHE.load(entries)
+    normalized = {_normalize_trans_key(k): float(v) for k, v in entries.items()}
+    _TRANS_CACHE.load(normalized)
 
 
 def drain_new_entries() -> dict:
@@ -73,13 +84,14 @@ def score_from_features(features) -> float:
 
 def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     powers = normalize_powers(powers)
-    key = (board_to_bb(board), powers["swap"], powers["delete"])
-    cached = _TRANS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    result = score_from_features(extract_eval_features(board, powers))
-    _TRANS_CACHE.store(key, result)
-    return result
+    board_key = board_to_bb(board)
+    base_score = _TRANS_CACHE.get(board_key)
+    if base_score is None:
+        base_score = score_from_features(extract_eval_features(board, powers, include_powerups=False))
+        _TRANS_CACHE.store(board_key, base_score)
+    max_tile = max(board[r][c] for r in range(4) for c in range(4))
+    dynamic_power = _EVAL_WEIGHTS.powerup * _powerup_value(board, max_tile, powers)
+    return base_score + dynamic_power
 
 
 _SEARCH_CACHE_CAP = 250_000
@@ -124,7 +136,14 @@ def _search_cache_store(key, value: float) -> None:
 
 
 def _search_key(board: list[list[int]], powers: dict, depth: int, is_max: bool) -> tuple:
-    return (board_to_bb(board), powers["swap"], powers["delete"], depth, 1 if is_max else 0)
+    return (
+        board_to_bb(board),
+        powers["undo"],
+        powers["swap"],
+        powers["delete"],
+        depth,
+        1 if is_max else 0,
+    )
 
 
 def auto_depth(board: list[list[int]]) -> int:
@@ -342,6 +361,12 @@ def _required_powerup_advantage(board: list[list[int]], uses_left: int, kind: st
         elif max_tile >= p.late_stage_tile_threshold:
             stage_factor = p.late_stage_margin_mult
     required = (base_margin + reserve_margin) * mult * stage_factor
+    # Preserve the final charge unless the tactical gain is clear. The reserve
+    # relaxes on jammed boards where immediate intervention is more valuable.
+    if uses_left <= 1:
+        last_use_margin = p.last_use_margin_calm * (1.0 - pressure) + p.last_use_margin_pressure * pressure
+        last_use_mult = p.last_use_swap_mult if kind == "swap" else p.last_use_delete_mult
+        required += last_use_margin * last_use_mult
     if kind == "delete" and max_tile >= p.delete_patience_min_tile and empties >= p.delete_patience_min_empties:
         required += (
             p.delete_patience_base_margin
