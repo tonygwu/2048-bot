@@ -633,15 +633,31 @@ async def play_one_game(
             blocked_action_once = None
 
         action_type = action[0]
-        planned_eval = projected_action_eval(
-            state.board,
-            state.powers,
-            action,
-            score_board_fn=score_board,
-            apply_move_fn=apply_move,
-            apply_swap_fn=apply_swap,
-            apply_delete_fn=apply_delete,
-        )
+        if action_type == "move":
+            # Align undo planned-value with move search semantics:
+            # expected post-spawn value from the moved board.
+            _, direction = action
+            moved_board, score_delta, changed = apply_move(state.board, direction)
+            if changed:
+                if depth > 1:
+                    planned_eval = (
+                        float(_expectimax([row[:] for row in moved_board], depth - 1, False, state.powers))
+                        + float(score_delta)
+                    )
+                else:
+                    planned_eval = float(score_board(moved_board, state.powers)) + float(score_delta)
+            else:
+                planned_eval = None
+        else:
+            planned_eval = projected_action_eval(
+                state.board,
+                state.powers,
+                action,
+                score_board_fn=score_board,
+                apply_move_fn=apply_move,
+                apply_swap_fn=apply_swap,
+                apply_delete_fn=apply_delete,
+            )
         action_payload = list(action)
 
         # ── Print status every 25 moves ───────────────────────────────────────

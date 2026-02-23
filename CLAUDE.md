@@ -256,6 +256,28 @@ Use these definitions consistently when comparing strategy changes:
 
 **Bot output** — cache stats are printed after each game and included in the summary table (`CacheHit%` column).
 
+## Undo Policy Calibration Notes (2026-02-23)
+
+- **Root cause of undo overfiring**: `plan_gap` was comparing a no-spawn projection (`projected_action_eval`) against post-spawn realized boards, which amplified spawn variance into false-positive Undo triggers.
+- **Implemented fix #1 (model alignment)**:
+  - In `bot.py`, move-action `planned_eval` now uses expectimax post-move expectation:
+    - `planned_eval = _expectimax(moved_board, depth-1, False, powers) + score_delta`
+  - Swap/delete still use `projected_action_eval`.
+- **Implemented fix #2 (stricter plan-gap gates)** in `strategy_config.py`:
+  - `undo_plan_gap_trigger`: `190.0 -> 240.0`
+  - `undo_plan_gap_ratio_trigger`: `0.03 -> 0.05`
+- **Quick diagnostic signal (browser-free simulation)**:
+  - Baseline (`no_spawn planned_eval + old thresholds`): undo_rate ~45.7%, `plan_gap_only` 347/1000 moves.
+  - After fix #1 only: undo_rate ~33.1%, `plan_gap_only` 221/1000.
+  - After fix #1 + #2: undo_rate ~26.4%, `plan_gap_only` 154/1000.
+  - `eval_drop` trigger counts stayed stable in the same runs (signal that true cliff detection remained active).
+- **High-sensitivity fixture for regressions**:
+  - `tests/boards/late_swap_open_sampling_trap_c.json`
+  - Best action at depth 4: `('move', 'right')`
+  - For spawn `(row=2, col=1, tile=2)`:
+    - old logic fired `plan_gap` Undo despite positive realized gain.
+    - new logic suppresses Undo on the same outcome.
+
 ## Key Implementation Notes
 
 - The site uses Svelte + Tailwind CSS with an OffscreenCanvas in a Web Worker. DOM inspection does not reveal tile values directly.

@@ -109,7 +109,7 @@ class PowerUpPolicy:
     # Undo triggers when post-action board quality drops sharply.
     undo_drop_trigger: float = 280.0
     # Also trigger when realized board quality misses planned board quality.
-    undo_plan_gap_trigger: float = 190.0
+    undo_plan_gap_trigger: float = 240.0
     # Reuse the same board-pressure concept used by swap/delete spend gating.
     undo_pressure_relief: float = 90.0
     # Spend undo more freely when we are at full bank.
@@ -126,7 +126,7 @@ class PowerUpPolicy:
     # Absolute drops can be noisy at high eval scales; require relative cliffs too.
     # Require a meaningful relative cliff before spending Undo.
     undo_drop_ratio_trigger: float = 0.08
-    undo_plan_gap_ratio_trigger: float = 0.03
+    undo_plan_gap_ratio_trigger: float = 0.05
     # Plan-gap-only undo can overfire when spawn randomness shifts expected value
     # despite a materially improved realized board. Allow this much improvement
     # before suppressing a plan-gap-only undo trigger.
