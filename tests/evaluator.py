@@ -143,6 +143,7 @@ class StrategyFns:
     apply_move: object
     apply_swap: object
     best_action: object
+    expectimax: object | None
     get_trans_stats: object
     is_game_over: object
     reset_trans_cache: object | None
@@ -294,6 +295,7 @@ def _load_strategy_fns(module_name: str) -> StrategyFns:
         apply_move=getattr(module, "apply_move"),
         apply_swap=getattr(module, "apply_swap"),
         best_action=getattr(module, "best_action"),
+        expectimax=getattr(module, "_expectimax", None),
         get_trans_stats=getattr(module, "get_trans_stats"),
         is_game_over=getattr(module, "is_game_over"),
         reset_trans_cache=getattr(module, "reset_trans_cache", None),
@@ -612,22 +614,38 @@ def _simulate_one(
                     blocked_direction=blocked_direction,
                     apply_move_fn=fns.apply_move,
                     score_board_fn=fns.score_board,
-                    expectimax_fn=None,
+                    expectimax_fn=fns.expectimax,
                 )
                 if fallback is not None:
                     action = fallback
             blocked_action_once = None
 
-        planned_eval = projected_action_eval(
-            board_before,
-            powers_before,
-            action,
-            score_board_fn=fns.score_board,
-            apply_move_fn=fns.apply_move,
-            apply_swap_fn=fns.apply_swap,
-            apply_delete_fn=fns.apply_delete,
-        )
         kind = action[0]
+        if kind == "move":
+            # Keep undo planning consistent with live bot semantics:
+            # compare against expected post-spawn value from moved board.
+            _, direction = action
+            moved_board, score_delta, changed = fns.apply_move(board_before, direction)
+            if changed:
+                if depth > 1 and fns.expectimax is not None:
+                    planned_eval = (
+                        float(fns.expectimax([row[:] for row in moved_board], depth - 1, False, powers_before))
+                        + float(score_delta)
+                    )
+                else:
+                    planned_eval = float(fns.score_board(moved_board, powers_before)) + float(score_delta)
+            else:
+                planned_eval = None
+        else:
+            planned_eval = projected_action_eval(
+                board_before,
+                powers_before,
+                action,
+                score_board_fn=fns.score_board,
+                apply_move_fn=fns.apply_move,
+                apply_swap_fn=fns.apply_swap,
+                apply_delete_fn=fns.apply_delete,
+            )
         action_counts[kind] = action_counts.get(kind, 0) + 1
         spawn = None
 
@@ -650,19 +668,11 @@ def _simulate_one(
             board = fns.apply_swap(board, r1, c1, r2, c2)
             powers = dict(powers)
             powers["swap"] = max(0, powers.get("swap", 0) - 1)
-            if not no_random:
-                after_action_board = [row[:] for row in board]
-                board = place_random_tile(board, rng)
-                spawn = _detect_spawn(after_action_board, board)
         elif kind == "delete":
             _, value, _, _ = action
             board = fns.apply_delete(board, value)
             powers = dict(powers)
             powers["delete"] = max(0, powers.get("delete", 0) - 1)
-            if not no_random:
-                after_action_board = [row[:] for row in board]
-                board = place_random_tile(board, rng)
-                spawn = _detect_spawn(after_action_board, board)
         else:
             termination_reason = "unknown_action"
             break

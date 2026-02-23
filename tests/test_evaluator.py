@@ -5,6 +5,8 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).parent.parent
@@ -211,6 +213,143 @@ class TestEvaluatorHelpers(unittest.TestCase):
                 )
                 agg = evaluator._aggregate([run], bootstrap_count=0)
                 self.assertAlmostEqual(agg[metric_key], 100.0, places=9)
+
+    def test_simulate_move_planned_eval_uses_expectimax_projection(self) -> None:
+        fixture = evaluator.Fixture(
+            name="plan_eval_fixture",
+            board=[[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+            score=0,
+            powers={"undo": 0, "swap": 0, "delete": 0},
+        )
+        seen_planned: list[float | None] = []
+
+        fake_fns = evaluator.StrategyFns(
+            apply_delete=lambda board, _value: [row[:] for row in board],
+            apply_move=lambda board, direction: (
+                ([[4, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], 4, True)
+                if direction == "left"
+                else ([row[:] for row in board], 0, False)
+            ),
+            apply_swap=lambda board, _r1, _c1, _r2, _c2: [row[:] for row in board],
+            best_action=lambda _board, _powers, depth=0: ("move", "left"),
+            expectimax=lambda _board, _depth, _is_max, _powers=None: 50.0,
+            get_trans_stats=lambda: {"hits": 0, "misses": 0},
+            is_game_over=lambda _board: False,
+            reset_trans_cache=lambda: None,
+            reset_trans_stats=lambda: None,
+            score_board=lambda board, _powers=None: float(sum(v for row in board for v in row)),
+        )
+
+        def fake_analyze_undo(*, planned_eval=None, **_kwargs):
+            seen_planned.append(planned_eval)
+            return SimpleNamespace(
+                should_undo=False,
+                reasons=(),
+                eval_drop=0.0,
+                eval_drop_ratio=0.0,
+                plan_gap=0.0,
+                plan_gap_ratio=0.0,
+                drop_trigger=0.0,
+                gap_trigger=0.0,
+                pressure=0.0,
+                eval_before=0.0,
+                eval_after=0.0,
+            )
+
+        with mock.patch.object(evaluator, "_load_strategy_fns", return_value=fake_fns):
+            with mock.patch.object(evaluator, "analyze_undo", side_effect=fake_analyze_undo):
+                evaluator._simulate_one(
+                    fixture=fixture,
+                    module_name="strategy",
+                    depth=3,
+                    n_moves=1,
+                    seed=0,
+                    no_random=True,
+                    cache_mode="warm",
+                )
+
+        self.assertTrue(seen_planned)
+        # planned_eval = expectimax(50) + score_delta(4)
+        self.assertAlmostEqual(float(seen_planned[0]), 54.0, places=6)
+
+    def test_simulate_fallback_after_undo_uses_expectimax_when_available(self) -> None:
+        fixture = evaluator.Fixture(
+            name="fallback_fixture",
+            board=[[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]],
+            score=0,
+            powers={"undo": 1, "swap": 0, "delete": 0},
+        )
+        def sentinel_expectimax(_board, _depth, _is_max, _powers=None):
+            return 0.0
+        seen_expectimax_arg: list[object | None] = []
+        call_count = {"undo": 0}
+
+        fake_fns = evaluator.StrategyFns(
+            apply_delete=lambda board, _value: [row[:] for row in board],
+            apply_move=lambda board, direction: (
+                ([[4, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], 4, True)
+                if direction == "left"
+                else ([row[:] for row in board], 0, False)
+            ),
+            apply_swap=lambda board, _r1, _c1, _r2, _c2: [row[:] for row in board],
+            best_action=lambda _board, _powers, depth=0: ("move", "left"),
+            expectimax=sentinel_expectimax,
+            get_trans_stats=lambda: {"hits": 0, "misses": 0},
+            is_game_over=lambda _board: False,
+            reset_trans_cache=lambda: None,
+            reset_trans_stats=lambda: None,
+            score_board=lambda board, _powers=None: float(sum(v for row in board for v in row)),
+        )
+
+        def fake_analyze_undo(**_kwargs):
+            call_count["undo"] += 1
+            if call_count["undo"] == 1:
+                return SimpleNamespace(
+                    should_undo=True,
+                    reasons=("eval_drop",),
+                    eval_drop=500.0,
+                    eval_drop_ratio=0.5,
+                    plan_gap=0.0,
+                    plan_gap_ratio=0.0,
+                    drop_trigger=100.0,
+                    gap_trigger=100.0,
+                    pressure=0.0,
+                    eval_before=10.0,
+                    eval_after=0.0,
+                )
+            return SimpleNamespace(
+                should_undo=False,
+                reasons=(),
+                eval_drop=0.0,
+                eval_drop_ratio=0.0,
+                plan_gap=0.0,
+                plan_gap_ratio=0.0,
+                drop_trigger=0.0,
+                gap_trigger=0.0,
+                pressure=0.0,
+                eval_before=0.0,
+                eval_after=0.0,
+            )
+
+        def fake_best_fallback_move(*, expectimax_fn=None, **_kwargs):
+            seen_expectimax_arg.append(expectimax_fn)
+            return ("move", "left")
+
+        with mock.patch.object(evaluator, "_load_strategy_fns", return_value=fake_fns):
+            with mock.patch.object(evaluator, "analyze_undo", side_effect=fake_analyze_undo):
+                with mock.patch.object(evaluator, "best_fallback_move", side_effect=fake_best_fallback_move):
+                    evaluator._simulate_one(
+                        fixture=fixture,
+                        module_name="strategy",
+                        depth=3,
+                        n_moves=3,
+                        seed=0,
+                        no_random=True,
+                        cache_mode="warm",
+                    )
+
+        self.assertTrue(seen_expectimax_arg)
+        self.assertIs(seen_expectimax_arg[0], sentinel_expectimax)
 
 
 if __name__ == "__main__":

@@ -181,7 +181,8 @@ def apply_action(
     else:
         raise ValueError(f"Unknown action type: {action_type!r}")
 
-    if not no_random:
+    # Live game semantics: only directional moves spawn a new tile.
+    if action_type == "move" and not no_random:
         next_board = place_random_tile(next_board, rng)
     return next_board, next_score, next_powers
 
@@ -324,15 +325,31 @@ def run(
         blocked_action_once = None
 
         action_type = action[0]
-        planned_eval = projected_action_eval(
-            board_before,
-            powers_before,
-            action,
-            score_board_fn=score_board,
-            apply_move_fn=apply_move,
-            apply_swap_fn=apply_swap,
-            apply_delete_fn=apply_delete,
-        )
+        if action_type == "move":
+            # Keep undo planning consistent with live bot semantics:
+            # compare against expected post-spawn value from moved board.
+            _, direction = action
+            moved_board, score_delta, changed = apply_move(board_before, direction)
+            if changed:
+                if depth > 1:
+                    planned_eval = (
+                        float(_expectimax([row[:] for row in moved_board], depth - 1, False, powers_before))
+                        + float(score_delta)
+                    )
+                else:
+                    planned_eval = float(score_board(moved_board, powers_before)) + float(score_delta)
+            else:
+                planned_eval = None
+        else:
+            planned_eval = projected_action_eval(
+                board_before,
+                powers_before,
+                action,
+                score_board_fn=score_board,
+                apply_move_fn=apply_move,
+                apply_swap_fn=apply_swap,
+                apply_delete_fn=apply_delete,
+            )
 
         if action_type == "move":
             direction         = action[1]

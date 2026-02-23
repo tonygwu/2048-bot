@@ -6,6 +6,7 @@ import random
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -104,6 +105,82 @@ class TestRunHarness(unittest.TestCase):
             no_random=True,
         )
         self.assertEqual(powers["delete"], 2)
+
+    def test_swap_does_not_spawn_random_tile(self) -> None:
+        board = [
+            [4, 2, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]
+        next_board, _, powers = run_mod.apply_action(
+            board,
+            0,
+            {"undo": 0, "swap": 1, "delete": 0},
+            ("swap", 0, 0, 0, 1),
+            rng=random.Random(0),
+            no_random=False,
+        )
+        self.assertEqual(next_board[0][0], 2)
+        self.assertEqual(next_board[0][1], 4)
+        self.assertEqual(sum(1 for r in range(4) for c in range(4) if next_board[r][c] > 0), 2)
+        self.assertEqual(powers["swap"], 0)
+
+    def test_delete_does_not_spawn_random_tile(self) -> None:
+        board = [
+            [2, 4, 2, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]
+        next_board, _, powers = run_mod.apply_action(
+            board,
+            0,
+            {"undo": 0, "swap": 0, "delete": 1},
+            ("delete", 2, 0, 0),
+            rng=random.Random(0),
+            no_random=False,
+        )
+        self.assertEqual(next_board[0][0], 0)
+        self.assertEqual(next_board[0][2], 0)
+        self.assertEqual(sum(1 for r in range(4) for c in range(4) if next_board[r][c] > 0), 1)
+        self.assertEqual(powers["delete"], 0)
+
+    def test_move_planned_eval_uses_expectimax_projection(self) -> None:
+        fixture = {
+            "name": "plan_eval_fixture",
+            "description": "move planned eval alignment",
+            "board": [
+                [2, 2, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+            "score": 0,
+            "powers": {"undo": 0, "swap": 0, "delete": 0},
+        }
+        seen_planned: list[float | None] = []
+
+        def fake_analyze_undo(*, planned_eval=None, **_kwargs):
+            seen_planned.append(planned_eval)
+            return SimpleNamespace(should_undo=False)
+
+        with mock.patch.object(run_mod, "best_action", return_value=("move", "left")):
+            with mock.patch.object(run_mod, "_expectimax", return_value=123.0):
+                with mock.patch.object(run_mod, "analyze_undo", side_effect=fake_analyze_undo):
+                    run_mod.run(
+                        fixture=fixture,
+                        num_moves=1,
+                        fixed_depth=3,
+                        rng=random.Random(0),
+                        show_scores=False,
+                        peek=False,
+                        no_random=True,
+                    )
+
+        self.assertTrue(seen_planned)
+        # 2+2 merge yields +4 score delta, so planned_eval should be 123 + 4.
+        self.assertAlmostEqual(float(seen_planned[0]), 127.0, places=6)
 
     def test_run_uses_power_aware_static_eval(self) -> None:
         fixture = {
