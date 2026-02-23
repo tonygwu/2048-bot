@@ -17,6 +17,7 @@ SCORE_BOARD_VERSION = "1.7"
 
 _TRANS_CAP = 500_000
 _TRANS_CACHE = TranspositionCache(cap=_TRANS_CAP)
+MIN_TRANS_CACHE_TILE = 1024
 
 
 def _normalize_trans_key(key) -> int:
@@ -397,11 +398,14 @@ def score_board(board: list[list[int]], powers: dict | None = None) -> float:
     `populate_cache.py --recompute` so SQLite contains scores for the new version.
     """
     powers = normalize_powers(powers)
-    board_key = board_to_bb(board)
-    base_score = _TRANS_CACHE.get(board_key)
-    if base_score is None:
-        base_score = score_from_features(extract_eval_features(board, powers, include_powerups=False))
-        _TRANS_CACHE.store(board_key, base_score)
     max_tile = max(board[r][c] for r in range(4) for c in range(4))
+    if max_tile >= MIN_TRANS_CACHE_TILE:
+        board_key = board_to_bb(board)
+        base_score = _TRANS_CACHE.get(board_key)
+        if base_score is None:
+            base_score = score_from_features(extract_eval_features(board, powers, include_powerups=False))
+            _TRANS_CACHE.store(board_key, base_score)
+    else:
+        base_score = score_from_features(extract_eval_features(board, powers, include_powerups=False))
     dynamic_power = DEFAULT_EVAL_WEIGHTS.powerup * _powerup_value(board, max_tile, powers)
     return base_score + dynamic_power

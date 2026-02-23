@@ -13,13 +13,14 @@ from strategy_actions import (
 )
 from strategy_config import DEFAULT_DEPTH_POLICY, DEFAULT_POWERUP_POLICY
 from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells, is_game_over
-from strategy_eval import _roughness, normalize_powers, score_board
+from strategy_eval import MIN_TRANS_CACHE_TILE, _roughness, normalize_powers, score_board
 from transposition_cache import TranspositionCache
 
 _SEARCH_CACHE_CAP = 250_000
 SEARCH_CACHE_VERSION = "s1"
 _SEARCH_CACHE = TranspositionCache(cap=_SEARCH_CACHE_CAP)
 _TERMINAL_LOSS_PENALTY = 25_000.0
+_MIN_SEARCH_CACHE_EXP = MIN_TRANS_CACHE_TILE.bit_length() - 1
 
 
 def reset_search_trans_cache() -> None:
@@ -169,16 +170,28 @@ def auto_depth(board: list[list[int]]) -> int:
 
 def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict | None = None) -> float:
     powers = normalize_powers(powers)
-    key = _search_key(board, powers, depth, is_max)
-    cached = _search_cache_get(key)
-    if cached is not None:
-        return cached
+    board_bb = board_to_bb(board)
+    use_cache = _max_exp_from_bb(board_bb) >= _MIN_SEARCH_CACHE_EXP
+    key = None
+    if use_cache:
+        key = (
+            board_bb,
+            powers["undo"],
+            powers["swap"],
+            powers["delete"],
+            depth,
+            1 if is_max else 0,
+        )
+        cached = _search_cache_get(key)
+        if cached is not None:
+            return cached
 
     if depth == 0:
         out = score_board(board, powers)
         if is_game_over(board):
             out -= _TERMINAL_LOSS_PENALTY
-        _search_cache_store(key, out)
+        if key is not None:
+            _search_cache_store(key, out)
         return out
 
     if is_max:
@@ -196,7 +209,8 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
             out = best
         else:
             out = score_board(board, powers) - _TERMINAL_LOSS_PENALTY
-        _search_cache_store(key, out)
+        if key is not None:
+            _search_cache_store(key, out)
         return out
 
     empties = empty_cells(board)
@@ -204,7 +218,8 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
         out = score_board(board, powers)
         if is_game_over(board):
             out -= _TERMINAL_LOSS_PENALTY
-        _search_cache_store(key, out)
+        if key is not None:
+            _search_cache_store(key, out)
         return out
     sample = empties if len(empties) <= 6 else empties[::len(empties) // 6 + 1][:6]
 
@@ -216,7 +231,8 @@ def _expectimax(board: list[list[int]], depth: int, is_max: bool, powers: dict |
         total += 0.1 * _expectimax(board, depth - 1, True, powers)
         board[r][c] = 0
     out = total / len(sample)
-    _search_cache_store(key, out)
+    if key is not None:
+        _search_cache_store(key, out)
     return out
 
 

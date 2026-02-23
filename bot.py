@@ -16,6 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 import datetime as dt
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,57 @@ from undo_policy import analyze_undo, best_fallback_move, projected_action_eval
 
 TARGET_TILE = 16384   # stop once this tile is reached
 PROFILE_LOG_DIR = Path(".bot_logs")
-INITIAL_CACHE_MAX_TILE_EXCLUSIVE = 1024
+CACHE_MIN_TILE = 1024
+INITIAL_PRELOAD_MIN_TILE = 1024
+INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE = 4096
+BACKGROUND_LOAD_TRIGGER_TILE = 2048
+POST_TRIGGER_LOAD_MIN_TILE = 4096
+
+
+def _max_exp_from_bb(bb: int) -> int:
+    v = int(bb)
+    out = 0
+    for _ in range(16):
+        nib = v & 0xF
+        if nib > out:
+            out = nib
+        v >>= 4
+    return out
+
+
+def _entry_max_tile_at_least(key: Any, min_tile: int) -> bool:
+    if min_tile <= 1:
+        return True
+    if isinstance(key, int):
+        bb = int(key)
+    elif isinstance(key, tuple) and len(key) >= 1:
+        bb = int(key[0])
+    else:
+        return False
+    min_exp = int(min_tile).bit_length() - 1
+    return _max_exp_from_bb(bb) >= min_exp
+
+
+def _filter_eval_entries(entries: dict, min_tile: int) -> tuple[dict, int]:
+    out = {}
+    dropped = 0
+    for key, value in entries.items():
+        if _entry_max_tile_at_least(key, min_tile):
+            out[key] = value
+        else:
+            dropped += 1
+    return out, dropped
+
+
+def _filter_search_entries(entries: dict, min_tile: int) -> tuple[dict, int]:
+    out = {}
+    dropped = 0
+    for key, value in entries.items():
+        if _entry_max_tile_at_least(key, min_tile):
+            out[key] = value
+        else:
+            dropped += 1
+    return out, dropped
 
 
 def _utc_now_iso() -> str:
@@ -173,42 +224,110 @@ class TieredCacheLoader:
         self._future: Future[dict[str, Any]] | None = None
         self._loading_threshold: int | None = None
         self._queued_threshold: int | None = None
-        self._active_floor: int = 0  # currently evicted below this max-tile floor
+        self._active_floor: int = INITIAL_PRELOAD_MIN_TILE  # currently evicted below this max-tile floor
+        self._loaded_threshold: int = 0
+        self._progress_lock = threading.Lock()
+        self._active_progress_keys: set[str] = set()
 
-    def _print_initial_progress(self, loaded: int, total: int) -> None:
-        if total > 0:
+    def _print_progress_line(
+        self,
+        key: str,
+        label: str,
+        loaded: int,
+        total: int,
+    ) -> None:
+        loaded_i = max(0, int(loaded))
+        total_i = max(0, int(total))
+        if total_i > 0:
             width = 34
-            ratio = min(1.0, loaded / total)
+            ratio = min(1.0, loaded_i / total_i)
             filled = int(width * ratio)
             bar = "#" * filled + "-" * (width - filled)
-            print(
-                f"\rLoading cache tier (<{INITIAL_CACHE_MAX_TILE_EXCLUSIVE}): "
-                f"[{bar}] {loaded:,}/{total:,} ({ratio*100:5.1f}%)",
-                end="",
-                flush=True,
+            msg = (
+                f"\r{label}: [{bar}] "
+                f"{loaded_i:,}/{total_i:,} ({ratio * 100:5.1f}%)"
             )
         else:
-            print(
-                f"\rLoading cache tier (<{INITIAL_CACHE_MAX_TILE_EXCLUSIVE}): {loaded:,} rows",
-                end="",
-                flush=True,
-            )
+            msg = f"\r{label}: {loaded_i:,} rows"
+
+        with self._progress_lock:
+            self._active_progress_keys.add(key)
+            print(msg, end="", flush=True)
+
+    def _finish_progress_line(self, key: str) -> None:
+        with self._progress_lock:
+            if key in self._active_progress_keys:
+                print()
+                self._active_progress_keys.discard(key)
+
+    def _print_initial_progress(self, loaded: int, total: int) -> None:
+        self._print_progress_line(
+            "initial-eval",
+            (
+                f"Loading eval cache tier "
+                f"({INITIAL_PRELOAD_MIN_TILE:,}..{INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,})"
+            ),
+            loaded,
+            total,
+        )
+
+    def _print_initial_search_progress(self, loaded: int, total: int) -> None:
+        self._print_progress_line(
+            "initial-search",
+            (
+                f"Loading search cache tier "
+                f"({INITIAL_PRELOAD_MIN_TILE:,}..{INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,})"
+            ),
+            loaded,
+            total,
+        )
+
+    def _print_tier_eval_progress(self, threshold: int, loaded: int, total: int) -> None:
+        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            label = f"[cache] loading tier {POST_TRIGGER_LOAD_MIN_TILE:,}+ eval"
+        else:
+            label = f"[cache] loading tier {threshold:,} <= max_tile < {threshold * 2:,} eval"
+        self._print_progress_line(
+            f"tier-{threshold}-eval",
+            label,
+            loaded,
+            total,
+        )
+
+    def _print_tier_search_progress(self, threshold: int, loaded: int, total: int) -> None:
+        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            label = f"[cache] loading tier {POST_TRIGGER_LOAD_MIN_TILE:,}+ search"
+        else:
+            label = f"[cache] loading tier {threshold:,} <= max_tile < {threshold * 2:,} search"
+        self._print_progress_line(
+            f"tier-{threshold}-search",
+            label,
+            loaded,
+            total,
+        )
 
     def initial_load(self) -> int:
-        """Synchronously preload the low-tile tier used at game start."""
-        print(f"Preloading cache tier: max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE}")
+        """Synchronously preload the mid-tier cache range used for early game."""
+        print(
+            f"Preloading cache tier: "
+            f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}"
+        )
         t0 = time.perf_counter()
         eval_entries = db.load_version_by_max_tile_range(
             self.eval_version,
-            max_max_tile=INITIAL_CACHE_MAX_TILE_EXCLUSIVE // 2,
+            min_max_tile=INITIAL_PRELOAD_MIN_TILE,
+            max_max_tile=INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE - 1,
             progress_cb=self._print_initial_progress,
         )
+        self._finish_progress_line("initial-eval")
         search_entries = db.load_search_version(
             self.eval_version,
             self.search_version,
-            max_max_tile=INITIAL_CACHE_MAX_TILE_EXCLUSIVE // 2,
+            min_max_tile=INITIAL_PRELOAD_MIN_TILE,
+            max_max_tile=INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE - 1,
+            progress_cb=self._print_initial_search_progress,
         )
-        print()
+        self._finish_progress_line("initial-search")
         if eval_entries:
             load_trans_table(eval_entries)
         if search_entries:
@@ -216,7 +335,8 @@ class TieredCacheLoader:
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         print(
             f"Loaded eval={len(eval_entries):,} search={len(search_entries):,} "
-            f"cached entries for max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE} "
+            f"cached entries for "
+            f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,} "
             f"in {elapsed_ms:.0f}ms"
         )
         if self.profiler is not None:
@@ -224,7 +344,8 @@ class TieredCacheLoader:
                 "cache_tier_initial_load",
                 eval_version=self.eval_version,
                 search_version=self.search_version,
-                max_tile_lt=INITIAL_CACHE_MAX_TILE_EXCLUSIVE,
+                max_tile_min=INITIAL_PRELOAD_MIN_TILE,
+                max_tile_max_exclusive=INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE,
                 loaded_eval_rows=len(eval_entries),
                 loaded_search_rows=len(search_entries),
                 elapsed_ms=round(elapsed_ms, 3),
@@ -236,23 +357,36 @@ class TieredCacheLoader:
 
     def _normalize_threshold(self, max_tile: int) -> int | None:
         mt = max(0, int(max_tile))
-        if mt < INITIAL_CACHE_MAX_TILE_EXCLUSIVE:
+        if mt < BACKGROUND_LOAD_TRIGGER_TILE:
             return None
-        return 1 << (mt.bit_length() - 1)
+        return POST_TRIGGER_LOAD_MIN_TILE
 
     def _load_tier_range_job(self, threshold: int) -> dict[str, Any]:
         t0 = time.perf_counter()
+        max_tile_inclusive = None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else (threshold * 2) - 1
         eval_entries = db.load_version_by_max_tile_range(
             self.eval_version,
             min_max_tile=threshold,
-            max_max_tile=threshold * 2,
+            max_max_tile=max_tile_inclusive,
+            progress_cb=lambda loaded, total: self._print_tier_eval_progress(
+                threshold,
+                loaded,
+                total,
+            ),
         )
+        self._finish_progress_line(f"tier-{threshold}-eval")
         search_entries = db.load_search_version(
             self.eval_version,
             self.search_version,
             min_max_tile=threshold,
-            max_max_tile=threshold * 2,
+            max_max_tile=max_tile_inclusive,
+            progress_cb=lambda loaded, total: self._print_tier_search_progress(
+                threshold,
+                loaded,
+                total,
+            ),
         )
+        self._finish_progress_line(f"tier-{threshold}-search")
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "threshold": threshold,
@@ -264,10 +398,13 @@ class TieredCacheLoader:
     def _start_load(self, threshold: int) -> None:
         self._loading_threshold = threshold
         self._future = self._executor.submit(self._load_tier_range_job, threshold)
-        print(
-            f"\n[cache] queued background tier load for max_tile "
-            f"{threshold:,}..{threshold * 2:,}"
-        )
+        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            print(f"\n[cache] queued background tier load for {POST_TRIGGER_LOAD_MIN_TILE:,}+")
+        else:
+            print(
+                f"\n[cache] queued background tier load for "
+                f"{threshold:,} <= max_tile < {threshold * 2:,}"
+            )
         if self.profiler is not None:
             self.profiler.emit(
                 "cache_tier_queued",
@@ -275,7 +412,7 @@ class TieredCacheLoader:
                 search_version=self.search_version,
                 threshold=threshold,
                 max_tile_min=threshold,
-                max_tile_max=threshold * 2,
+                max_tile_max_exclusive=None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else threshold * 2,
                 maxrss_raw=_maxrss_raw(),
             )
 
@@ -314,24 +451,62 @@ class TieredCacheLoader:
         eval_entries = payload.get("eval_entries", {})
         search_entries = payload.get("search_entries", {})
         elapsed_ms = float(payload.get("elapsed_ms", 0.0))
+        t_apply_start = time.perf_counter()
+        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            print(
+                f"\n[cache] applying tier {POST_TRIGGER_LOAD_MIN_TILE:,}+ to in-memory tables "
+                f"(eval={len(eval_entries):,}, search={len(search_entries):,})"
+            )
+        else:
+            print(
+                f"\n[cache] applying tier "
+                f"{threshold:,} <= max_tile < {threshold * 2:,} to in-memory tables "
+                f"(eval={len(eval_entries):,}, search={len(search_entries):,})"
+            )
+        t_apply_eval = time.perf_counter()
         if eval_entries:
             load_trans_table(eval_entries)
+        apply_eval_ms = (time.perf_counter() - t_apply_eval) * 1000.0
+        t_apply_search = time.perf_counter()
         if search_entries:
             load_search_trans_table(search_entries)
+        apply_search_ms = (time.perf_counter() - t_apply_search) * 1000.0
         evicted_eval = 0
         evicted_search = 0
-        if threshold > self._active_floor:
-            evicted_eval = evict_trans_below_max_tile(threshold)
-            evicted_search = evict_search_trans_below_max_tile(threshold)
-            self._active_floor = threshold
+        t_evict = time.perf_counter()
+        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            evict_floor = BACKGROUND_LOAD_TRIGGER_TILE
+        else:
+            evict_floor = max(INITIAL_PRELOAD_MIN_TILE, threshold // 2)
+        if evict_floor > self._active_floor:
+            print(f"[cache] evicting in-memory cache entries below max_tile {evict_floor:,}...")
+            evicted_eval = evict_trans_below_max_tile(evict_floor)
+            evicted_search = evict_search_trans_below_max_tile(evict_floor)
+            self._active_floor = evict_floor
+        self._loaded_threshold = max(self._loaded_threshold, threshold)
+        evict_ms = (time.perf_counter() - t_evict) * 1000.0
+        apply_total_ms = (time.perf_counter() - t_apply_start) * 1000.0
 
-        print(
-            f"\n[cache] applied tier {threshold:,}..{threshold * 2:,}: "
-            f"loaded_eval={len(eval_entries):,} loaded_search={len(search_entries):,} "
-            f"evicted_eval={evicted_eval:,} evicted_search={evicted_search:,} "
-            f"eval_size={get_trans_table_size():,} search_size={get_search_trans_table_size():,} "
-            f"({elapsed_ms:.0f}ms)"
-        )
+        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            print(
+                f"\n[cache] applied tier {POST_TRIGGER_LOAD_MIN_TILE:,}+: "
+                f"loaded_eval={len(eval_entries):,} loaded_search={len(search_entries):,} "
+                f"evicted_eval={evicted_eval:,} evicted_search={evicted_search:,} "
+                f"eval_size={get_trans_table_size():,} search_size={get_search_trans_table_size():,} "
+                f"(db_load={elapsed_ms:.0f}ms apply={apply_total_ms:.0f}ms "
+                f"eval_apply={apply_eval_ms:.0f}ms search_apply={apply_search_ms:.0f}ms "
+                f"evict={evict_ms:.0f}ms)"
+            )
+        else:
+            print(
+                f"\n[cache] applied tier {threshold:,} <= max_tile < {threshold * 2:,}: "
+                f"loaded_eval={len(eval_entries):,} loaded_search={len(search_entries):,} "
+                f"evicted_eval={evicted_eval:,} evicted_search={evicted_search:,} "
+                f"eval_size={get_trans_table_size():,} search_size={get_search_trans_table_size():,} "
+                f"(db_load={elapsed_ms:.0f}ms apply={apply_total_ms:.0f}ms "
+                f"eval_apply={apply_eval_ms:.0f}ms search_apply={apply_search_ms:.0f}ms "
+                f"evict={evict_ms:.0f}ms)"
+            )
         if self.profiler is not None:
             self.profiler.emit(
                 "cache_tier_applied",
@@ -339,18 +514,22 @@ class TieredCacheLoader:
                 search_version=self.search_version,
                 threshold=threshold,
                 max_tile_min=threshold,
-                max_tile_max=threshold * 2,
+                max_tile_max_exclusive=None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else threshold * 2,
                 loaded_eval_rows=len(eval_entries),
                 loaded_search_rows=len(search_entries),
                 evicted_eval_rows=evicted_eval,
                 evicted_search_rows=evicted_search,
                 elapsed_ms=round(elapsed_ms, 3),
+                apply_total_ms=round(apply_total_ms, 3),
+                apply_eval_ms=round(apply_eval_ms, 3),
+                apply_search_ms=round(apply_search_ms, 3),
+                evict_ms=round(evict_ms, 3),
                 trans_table_size=get_trans_table_size(),
                 search_trans_table_size=get_search_trans_table_size(),
                 maxrss_raw=_maxrss_raw(),
             )
 
-        if self._queued_threshold is not None and self._queued_threshold > self._active_floor:
+        if self._queued_threshold is not None and self._queued_threshold > self._loaded_threshold:
             next_threshold = self._queued_threshold
             self._queued_threshold = None
             self._start_load(next_threshold)
@@ -361,7 +540,7 @@ class TieredCacheLoader:
         """Poll completed background loads and enqueue next tier if needed."""
         self._apply_completed_load_if_ready()
         threshold = self._normalize_threshold(max_tile)
-        if threshold is None or threshold <= self._active_floor:
+        if threshold is None or threshold <= self._loaded_threshold:
             return
         if self._future is not None:
             if self._loading_threshold is not None and threshold > self._loading_threshold:
@@ -1013,7 +1192,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
         if loaded_initial == 0 and get_trans_table_size() == 0 and get_search_trans_table_size() == 0:
             print(
                 f"No cached entries found in initial tier "
-                f"(max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE}) "
+                f"({INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}) "
                 f"for versions=({SCORE_BOARD_VERSION!r}, {SEARCH_CACHE_VERSION!r})."
             )
     except Exception as exc:
@@ -1035,8 +1214,16 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
         include_current_drains: bool = False,
     ) -> None:
         if include_current_drains:
-            residual_eval_entries = drain_new_entries()
-            residual_search_entries = drain_search_new_entries()
+            residual_eval_entries_raw = drain_new_entries()
+            residual_search_entries_raw = drain_search_new_entries()
+            residual_eval_entries, residual_eval_dropped = _filter_eval_entries(
+                residual_eval_entries_raw,
+                CACHE_MIN_TILE,
+            )
+            residual_search_entries, residual_search_dropped = _filter_search_entries(
+                residual_search_entries_raw,
+                CACHE_MIN_TILE,
+            )
             if residual_eval_entries or residual_search_entries:
                 ts_now = get_trans_stats()
                 ss_now = get_search_trans_stats()
@@ -1055,6 +1242,8 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
                         "search_hits": ss_now["hits"],
                         "search_misses": ss_now["misses"],
                         "search_hit_rate": search_hit_rate,
+                        "dropped_eval": residual_eval_dropped,
+                        "dropped_search": residual_search_dropped,
                     }
                 )
 
@@ -1075,11 +1264,14 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             search_hits = int(item["search_hits"])
             search_misses = int(item["search_misses"])
             search_hit_rate = float(item["search_hit_rate"])
+            dropped_eval = int(item.get("dropped_eval", 0))
+            dropped_search = int(item.get("dropped_search", 0))
             print(
                 f"\nCache stats (game {game_label}): "
                 f"eval hits={eval_hits:,} misses={eval_misses:,} hit_rate={eval_hit_rate:.1f}%  "
                 f"search hits={search_hits:,} misses={search_misses:,} hit_rate={search_hit_rate:.1f}%  "
-                f"new_eval={len(eval_entries):,} new_search={len(search_entries):,}"
+                f"new_eval={len(eval_entries):,} new_search={len(search_entries):,}  "
+                f"skipped_lt_{CACHE_MIN_TILE} eval={dropped_eval:,} search={dropped_search:,}"
             )
             if not eval_entries and not search_entries:
                 print("  No new entries to flush.")
@@ -1198,8 +1390,16 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             search_hit_rate = ss["hits"] / search_total_lookups * 100 if search_total_lookups else 0.0
             # Unique additions can be lower than misses because the same missing
             # key may be evaluated more than once in a game.
-            new_eval_entries = drain_new_entries()
-            new_search_entries = drain_search_new_entries()
+            new_eval_entries_raw = drain_new_entries()
+            new_search_entries_raw = drain_search_new_entries()
+            new_eval_entries, dropped_eval_entries = _filter_eval_entries(
+                new_eval_entries_raw,
+                CACHE_MIN_TILE,
+            )
+            new_search_entries, dropped_search_entries = _filter_search_entries(
+                new_search_entries_raw,
+                CACHE_MIN_TILE,
+            )
             pending_db_flushes.append(
                 {
                     "game_num": game_num,
@@ -1211,6 +1411,8 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
                     "search_hits": ss["hits"],
                     "search_misses": ss["misses"],
                     "search_hit_rate": search_hit_rate,
+                    "dropped_eval": dropped_eval_entries,
+                    "dropped_search": dropped_search_entries,
                 }
             )
             stats["cache_hits"]   = ts["hits"]
