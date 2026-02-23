@@ -43,6 +43,8 @@ pypy3.10 -m venv .venv
 .venv/bin/python tests/run.py jammed --scores          # print expectimax score per direction
 .venv/bin/python tests/run.py swap_test --peek         # show only the first action, then stop
 .venv/bin/python tests/run.py late_game --no-random    # skip tile placement (pure decision trace)
+.venv/bin/python tests/run.py late_game --depth 2 --moves 80 --episodes 20 --write-to-cache
+.venv/bin/python tests/run.py promotion_8192_pipeline --depth 2 --moves 120 --episodes 50 --seed 42 --write-to-cache
 
 # Canonical evaluator (shared metrics for heuristic + depth experiments)
 .venv/bin/python tests/evaluator.py
@@ -170,6 +172,11 @@ Use these definitions consistently when comparing strategy changes:
   - `--peek`: stop after the first chosen action.
   - `--seed`: deterministic tile-spawn randomness for reproducible traces.
   - `--no-random`: disable tile placement to trace pure policy behavior.
+- Optional cache-seeding flags:
+  - `--episodes N`: repeat the same fixture N times to explore more states.
+  - `--write-to-cache`: flush newly evaluated states to SQLite.
+  - `--cache-target-version`: DB version label to write (defaults to `SCORE_BOARD_VERSION`, currently `1.7`).
+  - `--cache-flush-every-moves` / `--cache-write-chunk`: batch/flush controls for write efficiency.
 - Applies move/swap/delete actions locally, shares spawn semantics via `sim_utils.place_random_tile(...)`, and exercises undo/fallback policy checks (`analyze_undo`, `best_fallback_move`).
 - Use `tests/run.py` for qualitative debugging; use `tests/evaluator.py` for canonical aggregate metrics and A/B comparisons.
 
@@ -189,7 +196,7 @@ Use these definitions consistently when comparing strategy changes:
 - Power-up value is dynamic and added on read (`base_score + dynamic_powerup_term`), so power-up counts are not part of the persisted/in-memory eval-cache key.
 - On cap pressure, cache eviction is LRU (no full-table clear); oversized preloads are still preserved.
 - `drain_new_entries()` still returns newly-added keys for SQLite flush after each game.
-- Search has a separate in-memory transposition cache in `strategy_search.py` keyed by `(board_bb, swap_uses, delete_uses, depth, is_max)` for `_expectimax` subtree reuse (not persisted to SQLite).
+- Search has a separate in-memory transposition cache in `strategy_search.py` keyed by `(board_bb, undo_uses, swap_uses, delete_uses, depth, is_max)` for `_expectimax` subtree reuse (not persisted to SQLite).
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
 - Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, the preloaded table is preserved and new lookups are not inserted into the in-memory table; they are still tracked for DB flush.
 

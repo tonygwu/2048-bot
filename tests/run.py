@@ -12,6 +12,7 @@ Usage:
   .venv/bin/python tests/run.py jammed --scores            # show eval score per direction
   .venv/bin/python tests/run.py swap_test --peek           # show first action only, then stop
   .venv/bin/python tests/run.py mid_game --no-random       # skip random tile placement
+  .venv/bin/python tests/run.py late_game --depth 2 --moves 80 --episodes 20 --write-to-cache
 """
 
 import argparse
@@ -25,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 
+import cache as db
 from sim_utils import count_created_tile, place_random_tile, recharge_delete_uses
 from strategy import (
     DIRECTIONS,
@@ -34,6 +36,7 @@ from strategy import (
     apply_swap,
     auto_depth,
     best_action,
+    drain_new_entries,
     is_game_over,
     score_board,
     _expectimax,
@@ -191,19 +194,56 @@ def run(
     show_scores: bool,
     peek: bool,
     no_random: bool,
-) -> None:
+    *,
+    write_to_cache: bool = False,
+    cache_target_version: str = SCORE_BOARD_VERSION,
+    cache_write_chunk: int = 50_000,
+    cache_flush_every_moves: int = 100,
+    episode_index: int = 1,
+    episodes_total: int = 1,
+) -> dict:
     board  = [row[:] for row in fixture["board"]]
     score  = fixture.get("score", 0)
     powers = dict(fixture.get("powers", {}))
 
     name = fixture.get("name", "unnamed")
     desc = fixture.get("description", "")
+    cache_target_version = cache_target_version.strip() or SCORE_BOARD_VERSION
+    cache_write_chunk = max(1, int(cache_write_chunk))
+    cache_flush_every_moves = max(1, int(cache_flush_every_moves))
+    cache_written_total = 0
+
+    def flush_cache_entries(reason: str) -> int:
+        nonlocal cache_written_total
+        if not write_to_cache:
+            return 0
+        new_entries = drain_new_entries()
+        if not new_entries:
+            return 0
+        written = db.save_entries(
+            new_entries,
+            cache_target_version,
+            batch_size=cache_write_chunk,
+        )
+        cache_written_total += written
+        print(
+            f"  [cache] flushed {written:,} entries ({reason}, total={cache_written_total:,}, "
+            f"target_version={cache_target_version!r})"
+        )
+        return written
 
     print(f"\n{'═'*54}")
+    if episodes_total > 1:
+        print(f"  Episode: {episode_index}/{episodes_total}")
     print(f"  Board: {name}")
     if desc:
         print(f"  {desc}")
     print(f"{'═'*54}")
+    if write_to_cache:
+        print(
+            f"  Cache write: enabled  target_version={cache_target_version!r}  "
+            f"flush_every_moves={cache_flush_every_moves}  write_chunk={cache_write_chunk:,}"
+        )
 
     max_tile = max(v for row in board for v in row)
     depth    = fixed_depth if fixed_depth is not None else auto_depth(board)
@@ -214,7 +254,8 @@ def run(
 
     if is_game_over(board):
         print("\nThis board is already game-over — no moves possible.")
-        return
+        flush_cache_entries("game-over-initial")
+        return {"cache_written": cache_written_total, "moves_played": 0}
 
     action_num = 0
     blocked_action_once = None
@@ -332,6 +373,9 @@ def run(
             print_board(board, score=score, powers=powers)
             print(f"  Static eval after undo: {score_board(board, powers):.1f}")
 
+        if action_num % cache_flush_every_moves == 0:
+            flush_cache_entries(f"after {action_num} action(s)")
+
         if is_game_over(board):
             print("\n  Game over — no moves remain.")
             break
@@ -341,7 +385,11 @@ def run(
             break
 
     max_tile = max(v for row in board for v in row)
+    flush_cache_entries("final")
     print(f"\nFinal  score={score}  max_tile={max_tile}")
+    if write_to_cache:
+        print(f"Cache write summary: {cache_written_total:,} entries written to version {cache_target_version!r}")
+    return {"cache_written": cache_written_total, "moves_played": action_num}
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -359,6 +407,7 @@ examples:
   .venv/bin/python tests/run.py swap_test --peek      # show only the first action
   .venv/bin/python tests/run.py mid_game --seed 42    # reproducible random tile spawns
   .venv/bin/python tests/run.py mid_game --no-random  # skip tile spawning (pure decision trace)
+  .venv/bin/python tests/run.py late_game --depth 2 --moves 80 --episodes 20 --write-to-cache
 """,
     )
     parser.add_argument(
@@ -389,6 +438,26 @@ examples:
         "--no-random", dest="no_random", action="store_true",
         help="Do not place random tiles after moves (trace decisions without noise)",
     )
+    parser.add_argument(
+        "--episodes", type=int, default=1,
+        help="Run this fixture repeatedly to explore more board states (default: 1)",
+    )
+    parser.add_argument(
+        "--write-to-cache", action="store_true",
+        help="Flush newly evaluated states from this run into SQLite cache",
+    )
+    parser.add_argument(
+        "--cache-target-version", type=str, default=SCORE_BOARD_VERSION,
+        help="Version label for cache writes (default: SCORE_BOARD_VERSION)",
+    )
+    parser.add_argument(
+        "--cache-write-chunk", type=int, default=50_000,
+        help="Batch size for SQLite writes when --write-to-cache is enabled (default: 50000)",
+    )
+    parser.add_argument(
+        "--cache-flush-every-moves", type=int, default=100,
+        help="Flush pending cache entries every N actions (default: 100)",
+    )
     args = parser.parse_args()
     print(f"Using SCORE_BOARD_VERSION={SCORE_BOARD_VERSION!r}")
 
@@ -407,21 +476,45 @@ examples:
         except ValueError:
             parser.error(f"--depth must be a positive integer or 'auto', got: {args.depth!r}")
 
+    if args.episodes < 1:
+        parser.error(f"--episodes must be >= 1, got: {args.episodes!r}")
+    if args.cache_write_chunk < 1:
+        parser.error(f"--cache-write-chunk must be >= 1, got: {args.cache_write_chunk!r}")
+    if args.cache_flush_every_moves < 1:
+        parser.error(f"--cache-flush-every-moves must be >= 1, got: {args.cache_flush_every_moves!r}")
+
     fixture = load_fixture(args.board)
     rng     = random.Random(args.seed)
 
     if args.seed is not None:
         print(f"(random seed: {args.seed})")
 
-    run(
-        fixture=fixture,
-        num_moves=args.moves,
-        fixed_depth=fixed_depth,
-        rng=rng,
-        show_scores=args.scores,
-        peek=args.peek,
-        no_random=args.no_random,
-    )
+    total_written = 0
+    total_actions = 0
+    for episode in range(1, args.episodes + 1):
+        result = run(
+            fixture=fixture,
+            num_moves=args.moves,
+            fixed_depth=fixed_depth,
+            rng=rng,
+            show_scores=args.scores,
+            peek=args.peek,
+            no_random=args.no_random,
+            write_to_cache=args.write_to_cache,
+            cache_target_version=args.cache_target_version,
+            cache_write_chunk=args.cache_write_chunk,
+            cache_flush_every_moves=args.cache_flush_every_moves,
+            episode_index=episode,
+            episodes_total=args.episodes,
+        )
+        total_written += int(result.get("cache_written", 0))
+        total_actions += int(result.get("moves_played", 0))
+
+    if args.episodes > 1:
+        print(
+            f"\nEpisodes summary: episodes={args.episodes}  "
+            f"moves_played={total_actions:,}  cache_written={total_written:,}"
+        )
 
 
 if __name__ == "__main__":
