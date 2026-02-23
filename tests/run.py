@@ -30,6 +30,7 @@ import cache as db
 from sim_utils import count_created_tile, place_random_tile, recharge_delete_uses
 from strategy import (
     DIRECTIONS,
+    SEARCH_CACHE_VERSION,
     SCORE_BOARD_VERSION,
     apply_delete,
     apply_move,
@@ -460,6 +461,7 @@ examples:
     )
     args = parser.parse_args()
     print(f"Using SCORE_BOARD_VERSION={SCORE_BOARD_VERSION!r}")
+    print(f"Using SEARCH_CACHE_VERSION={SEARCH_CACHE_VERSION!r}")
 
     if args.board is None:
         print(f"Available boards in {BOARDS_DIR.relative_to(ROOT)}:")

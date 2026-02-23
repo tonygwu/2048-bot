@@ -1,7 +1,7 @@
 """Search policy and action selection."""
 
 import math
-from collections import Counter, OrderedDict
+from collections import Counter
 
 from strategy_actions import (
     Action,
@@ -14,47 +14,91 @@ from strategy_actions import (
 from strategy_config import DEFAULT_DEPTH_POLICY, DEFAULT_POWERUP_POLICY
 from strategy_core import DIRECTIONS, apply_move, board_to_bb, empty_cells, is_game_over
 from strategy_eval import _roughness, normalize_powers, score_board
+from transposition_cache import TranspositionCache
 
 _SEARCH_CACHE_CAP = 250_000
-_SEARCH_CACHE: OrderedDict = OrderedDict()
-_SEARCH_CACHE_HITS = 0
-_SEARCH_CACHE_MISSES = 0
+SEARCH_CACHE_VERSION = "s1"
+_SEARCH_CACHE = TranspositionCache(cap=_SEARCH_CACHE_CAP)
 _TERMINAL_LOSS_PENALTY = 25_000.0
 
 
 def reset_search_trans_cache() -> None:
-    _SEARCH_CACHE.clear()
-    reset_search_trans_stats()
+    _SEARCH_CACHE.table.clear()
+    _SEARCH_CACHE.new_entries.clear()
+    _SEARCH_CACHE.keep_oversized_preload = False
+    _SEARCH_CACHE.reset_stats()
 
 
 def reset_search_trans_stats() -> None:
-    global _SEARCH_CACHE_HITS, _SEARCH_CACHE_MISSES
-    _SEARCH_CACHE_HITS = 0
-    _SEARCH_CACHE_MISSES = 0
+    _SEARCH_CACHE.reset_stats()
 
 
 def get_search_trans_stats() -> dict:
-    return {"hits": _SEARCH_CACHE_HITS, "misses": _SEARCH_CACHE_MISSES, "size": len(_SEARCH_CACHE)}
+    stats = _SEARCH_CACHE.stats()
+    return {"hits": stats["hits"], "misses": stats["misses"], "size": len(_SEARCH_CACHE.table)}
+
+
+def get_search_trans_table_size() -> int:
+    return len(_SEARCH_CACHE.table)
+
+
+def _max_exp_from_bb(bb: int) -> int:
+    v = int(bb)
+    out = 0
+    for _ in range(16):
+        nib = v & 0xF
+        if nib > out:
+            out = nib
+        v >>= 4
+    return out
+
+
+def _normalize_search_key(key) -> tuple[int, int, int, int, int, int]:
+    if isinstance(key, tuple) and len(key) >= 6:
+        try:
+            is_max = 1 if int(key[5]) != 0 else 0
+        except Exception:
+            is_max = 1 if bool(key[5]) else 0
+        return (
+            int(key[0]),
+            max(0, min(2, int(key[1]))),
+            max(0, min(2, int(key[2]))),
+            max(0, min(2, int(key[3]))),
+            max(0, int(key[4])),
+            is_max,
+        )
+    raise ValueError(f"unexpected search transposition key shape: {key!r}")
+
+
+def load_search_trans_table(entries: dict) -> None:
+    normalized = {_normalize_search_key(k): float(v) for k, v in entries.items()}
+    _SEARCH_CACHE.load(normalized)
+
+
+def drain_search_new_entries() -> dict:
+    return _SEARCH_CACHE.drain_new_entries()
+
+
+def evict_search_trans_below_max_tile(min_tile: int) -> int:
+    threshold = max(0, int(min_tile))
+    if threshold <= 1:
+        return 0
+    min_exp = threshold.bit_length() - 1
+    drop_keys = [k for k in _SEARCH_CACHE.table.keys() if _max_exp_from_bb(int(k[0])) < min_exp]
+    for key in drop_keys:
+        _SEARCH_CACHE.table.pop(key, None)
+        _SEARCH_CACHE.new_entries.pop(key, None)
+    if len(_SEARCH_CACHE.table) <= _SEARCH_CACHE.cap:
+        _SEARCH_CACHE.keep_oversized_preload = False
+    return len(drop_keys)
 
 
 def _search_cache_get(key):
-    global _SEARCH_CACHE_HITS, _SEARCH_CACHE_MISSES
-    if key not in _SEARCH_CACHE:
-        _SEARCH_CACHE_MISSES += 1
-        return None
-    _SEARCH_CACHE_HITS += 1
-    _SEARCH_CACHE.move_to_end(key, last=True)
-    return _SEARCH_CACHE[key]
+    return _SEARCH_CACHE.get(key)
 
 
 def _search_cache_store(key, value: float) -> None:
-    if key in _SEARCH_CACHE:
-        _SEARCH_CACHE[key] = value
-        _SEARCH_CACHE.move_to_end(key, last=True)
-        return
-    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_CAP:
-        _SEARCH_CACHE.popitem(last=False)
-    _SEARCH_CACHE[key] = value
+    _SEARCH_CACHE.store(key, float(value))
 
 
 def _search_key(board: list[list[int]], powers: dict, depth: int, is_max: bool) -> tuple:

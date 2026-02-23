@@ -31,6 +31,7 @@ from game import (
     dismiss_win_overlay, new_game, print_board,
 )
 from strategy import (
+    SEARCH_CACHE_VERSION,
     _expectimax,
     apply_delete,
     apply_move,
@@ -39,9 +40,13 @@ from strategy import (
     best_action,
     auto_depth,
     SCORE_BOARD_VERSION,
+    drain_search_new_entries,
     load_trans_table,
+    load_search_trans_table,
     drain_new_entries,
+    evict_search_trans_below_max_tile,
     evict_trans_below_max_tile,
+    get_search_trans_table_size,
     get_trans_table_size,
     get_trans_stats,
     get_search_trans_stats,
@@ -155,8 +160,14 @@ def _cache_bucket_label(key: int) -> str:
 class TieredCacheLoader:
     """Progressively load transposition cache tiers from SQLite in background."""
 
-    def __init__(self, version: str, profiler: ProfileLogger | None = None) -> None:
-        self.version = version
+    def __init__(
+        self,
+        eval_version: str,
+        search_version: str,
+        profiler: ProfileLogger | None = None,
+    ) -> None:
+        self.eval_version = eval_version
+        self.search_version = search_version
         self.profiler = profiler
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="trans-cache-loader")
         self._future: Future[dict[str, Any]] | None = None
@@ -187,30 +198,41 @@ class TieredCacheLoader:
         """Synchronously preload the low-tile tier used at game start."""
         print(f"Preloading cache tier: max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE}")
         t0 = time.perf_counter()
-        entries = db.load_version_by_max_tile_range(
-            self.version,
+        eval_entries = db.load_version_by_max_tile_range(
+            self.eval_version,
             max_max_tile=INITIAL_CACHE_MAX_TILE_EXCLUSIVE // 2,
             progress_cb=self._print_initial_progress,
         )
+        search_entries = db.load_search_version(
+            self.eval_version,
+            self.search_version,
+            max_max_tile=INITIAL_CACHE_MAX_TILE_EXCLUSIVE // 2,
+        )
         print()
-        if entries:
-            load_trans_table(entries)
+        if eval_entries:
+            load_trans_table(eval_entries)
+        if search_entries:
+            load_search_trans_table(search_entries)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         print(
-            f"Loaded {len(entries):,} cached entries for max_tile < "
-            f"{INITIAL_CACHE_MAX_TILE_EXCLUSIVE} in {elapsed_ms:.0f}ms"
+            f"Loaded eval={len(eval_entries):,} search={len(search_entries):,} "
+            f"cached entries for max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE} "
+            f"in {elapsed_ms:.0f}ms"
         )
         if self.profiler is not None:
             self.profiler.emit(
                 "cache_tier_initial_load",
-                version=self.version,
+                eval_version=self.eval_version,
+                search_version=self.search_version,
                 max_tile_lt=INITIAL_CACHE_MAX_TILE_EXCLUSIVE,
-                loaded_rows=len(entries),
+                loaded_eval_rows=len(eval_entries),
+                loaded_search_rows=len(search_entries),
                 elapsed_ms=round(elapsed_ms, 3),
                 trans_table_size=get_trans_table_size(),
+                search_trans_table_size=get_search_trans_table_size(),
                 maxrss_raw=_maxrss_raw(),
             )
-        return len(entries)
+        return len(eval_entries)
 
     def _normalize_threshold(self, max_tile: int) -> int | None:
         mt = max(0, int(max_tile))
@@ -220,15 +242,22 @@ class TieredCacheLoader:
 
     def _load_tier_range_job(self, threshold: int) -> dict[str, Any]:
         t0 = time.perf_counter()
-        entries = db.load_version_by_max_tile_range(
-            self.version,
+        eval_entries = db.load_version_by_max_tile_range(
+            self.eval_version,
+            min_max_tile=threshold,
+            max_max_tile=threshold * 2,
+        )
+        search_entries = db.load_search_version(
+            self.eval_version,
+            self.search_version,
             min_max_tile=threshold,
             max_max_tile=threshold * 2,
         )
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return {
             "threshold": threshold,
-            "entries": entries,
+            "eval_entries": eval_entries,
+            "search_entries": search_entries,
             "elapsed_ms": elapsed_ms,
         }
 
@@ -242,7 +271,8 @@ class TieredCacheLoader:
         if self.profiler is not None:
             self.profiler.emit(
                 "cache_tier_queued",
-                version=self.version,
+                eval_version=self.eval_version,
+                search_version=self.search_version,
                 threshold=threshold,
                 max_tile_min=threshold,
                 max_tile_max=threshold * 2,
@@ -268,38 +298,55 @@ class TieredCacheLoader:
             if self.profiler is not None:
                 self.profiler.emit(
                     "cache_tier_error",
-                    version=self.version,
+                    eval_version=self.eval_version,
+                    search_version=self.search_version,
                     threshold=threshold,
                     error={"type": type(exc).__name__, "message": str(exc)},
                     maxrss_raw=_maxrss_raw(),
                 )
-            payload = {"threshold": threshold, "entries": {}, "elapsed_ms": 0.0}
+            payload = {
+                "threshold": threshold,
+                "eval_entries": {},
+                "search_entries": {},
+                "elapsed_ms": 0.0,
+            }
 
-        entries = payload.get("entries", {})
+        eval_entries = payload.get("eval_entries", {})
+        search_entries = payload.get("search_entries", {})
         elapsed_ms = float(payload.get("elapsed_ms", 0.0))
-        if entries:
-            load_trans_table(entries)
-        evicted = 0
+        if eval_entries:
+            load_trans_table(eval_entries)
+        if search_entries:
+            load_search_trans_table(search_entries)
+        evicted_eval = 0
+        evicted_search = 0
         if threshold > self._active_floor:
-            evicted = evict_trans_below_max_tile(threshold)
+            evicted_eval = evict_trans_below_max_tile(threshold)
+            evicted_search = evict_search_trans_below_max_tile(threshold)
             self._active_floor = threshold
 
         print(
             f"\n[cache] applied tier {threshold:,}..{threshold * 2:,}: "
-            f"loaded={len(entries):,} evicted={evicted:,} "
-            f"table_size={get_trans_table_size():,} ({elapsed_ms:.0f}ms)"
+            f"loaded_eval={len(eval_entries):,} loaded_search={len(search_entries):,} "
+            f"evicted_eval={evicted_eval:,} evicted_search={evicted_search:,} "
+            f"eval_size={get_trans_table_size():,} search_size={get_search_trans_table_size():,} "
+            f"({elapsed_ms:.0f}ms)"
         )
         if self.profiler is not None:
             self.profiler.emit(
                 "cache_tier_applied",
-                version=self.version,
+                eval_version=self.eval_version,
+                search_version=self.search_version,
                 threshold=threshold,
                 max_tile_min=threshold,
                 max_tile_max=threshold * 2,
-                loaded_rows=len(entries),
-                evicted_rows=evicted,
+                loaded_eval_rows=len(eval_entries),
+                loaded_search_rows=len(search_entries),
+                evicted_eval_rows=evicted_eval,
+                evicted_search_rows=evicted_search,
                 elapsed_ms=round(elapsed_ms, 3),
                 trans_table_size=get_trans_table_size(),
+                search_trans_table_size=get_search_trans_table_size(),
                 maxrss_raw=_maxrss_raw(),
             )
 
@@ -923,6 +970,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
     label = "auto" if depth_arg is None else str(depth_arg)
     print(f"Launching 2048 bot  (depth={label}, games={num_games}, headless={headless})")
     print(f"Using SCORE_BOARD_VERSION={SCORE_BOARD_VERSION!r}")
+    print(f"Using SEARCH_CACHE_VERSION={SEARCH_CACHE_VERSION!r}")
     profile_path = _resolve_profile_log_path(profile_log)
     profiler = ProfileLogger(profile_path)
     if profiler.enabled and profiler.path is not None:
@@ -934,26 +982,39 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
             games=num_games,
             headless=headless,
             cache_db=str(db.DB_PATH),
+            eval_version=SCORE_BOARD_VERSION,
+            search_version=SEARCH_CACHE_VERSION,
             maxrss_raw=_maxrss_raw(),
         )
 
     # ── Load transposition table from DB ──────────────────────────────────────
     print(f"Cache DB path: {db.DB_PATH}")
-    cache_loader = TieredCacheLoader(SCORE_BOARD_VERSION, profiler=profiler)
+    cache_loader = TieredCacheLoader(
+        SCORE_BOARD_VERSION,
+        SEARCH_CACHE_VERSION,
+        profiler=profiler,
+    )
     try:
         versions = db.list_versions()
-        version_rows = versions.get(SCORE_BOARD_VERSION, 0)
-        print(f"Cache rows for current version {SCORE_BOARD_VERSION!r}: {version_rows:,}")
+        eval_rows = versions.get(SCORE_BOARD_VERSION, 0)
+        print(f"Eval cache rows for version {SCORE_BOARD_VERSION!r}: {eval_rows:,}")
+
+        search_versions = db.list_search_versions()
+        search_rows = search_versions.get((SCORE_BOARD_VERSION, SEARCH_CACHE_VERSION), 0)
+        print(
+            "Search cache rows for versions "
+            f"({SCORE_BOARD_VERSION!r}, {SEARCH_CACHE_VERSION!r}): {search_rows:,}"
+        )
     except Exception as e:
         print(f"Could not read cache version counts from DB: {e}")
 
     try:
         loaded_initial = cache_loader.initial_load()
-        if loaded_initial == 0:
+        if loaded_initial == 0 and get_trans_table_size() == 0 and get_search_trans_table_size() == 0:
             print(
                 f"No cached entries found in initial tier "
                 f"(max_tile < {INITIAL_CACHE_MAX_TILE_EXCLUSIVE}) "
-                f"for version={SCORE_BOARD_VERSION!r}."
+                f"for versions=({SCORE_BOARD_VERSION!r}, {SEARCH_CACHE_VERSION!r})."
             )
     except Exception as exc:
         print(
@@ -965,7 +1026,7 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
     browser = None
     page = None
     all_stats = []
-    pending_db_flushes: list[tuple[int, dict, int, int, float]] = []
+    pending_db_flushes: list[dict[str, Any]] = []
     try:
         pw, browser, page = await launch_browser(headless=headless)
         for game_num in range(1, num_games + 1):
@@ -1020,19 +1081,27 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
 
             # ── Collect cache stats for this game ─────────────────────────────
             ts = get_trans_stats()
-            total_lookups = ts["hits"] + ts["misses"]
-            hit_rate = ts["hits"] / total_lookups * 100 if total_lookups else 0.0
+            ss = get_search_trans_stats()
+            eval_total_lookups = ts["hits"] + ts["misses"]
+            eval_hit_rate = ts["hits"] / eval_total_lookups * 100 if eval_total_lookups else 0.0
+            search_total_lookups = ss["hits"] + ss["misses"]
+            search_hit_rate = ss["hits"] / search_total_lookups * 100 if search_total_lookups else 0.0
             # Unique additions can be lower than misses because the same missing
             # key may be evaluated more than once in a game.
-            new_entries = drain_new_entries()
+            new_eval_entries = drain_new_entries()
+            new_search_entries = drain_search_new_entries()
             pending_db_flushes.append(
-                (
-                    game_num,
-                    new_entries,
-                    ts["hits"],
-                    ts["misses"],
-                    hit_rate,
-                )
+                {
+                    "game_num": game_num,
+                    "eval_new_entries": new_eval_entries,
+                    "search_new_entries": new_search_entries,
+                    "eval_hits": ts["hits"],
+                    "eval_misses": ts["misses"],
+                    "eval_hit_rate": eval_hit_rate,
+                    "search_hits": ss["hits"],
+                    "search_misses": ss["misses"],
+                    "search_hit_rate": search_hit_rate,
+                }
             )
             stats["cache_hits"]   = ts["hits"]
             stats["cache_misses"] = ts["misses"]
@@ -1087,48 +1156,74 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
                 )
 
         # ── Persist cache updates after summary output ────────────────────────
-        total_flush_rows = 0
+        total_flush_eval_rows = 0
+        total_flush_search_rows = 0
         total_flush_seconds = 0.0
         if pending_db_flushes:
             print("\nPersisting cache updates to DB...")
-        for game_num, new_entries, hits, misses, hit_rate in pending_db_flushes:
+        for item in pending_db_flushes:
+            game_num = int(item["game_num"])
+            eval_entries = item["eval_new_entries"]
+            search_entries = item["search_new_entries"]
+            eval_hits = int(item["eval_hits"])
+            eval_misses = int(item["eval_misses"])
+            eval_hit_rate = float(item["eval_hit_rate"])
+            search_hits = int(item["search_hits"])
+            search_misses = int(item["search_misses"])
+            search_hit_rate = float(item["search_hit_rate"])
             print(
                 f"\nCache stats (game {game_num}): "
-                f"hits={hits:,}  misses={misses:,}  hit_rate={hit_rate:.1f}%  "
-                f"unique_new={len(new_entries):,}"
+                f"eval hits={eval_hits:,} misses={eval_misses:,} hit_rate={eval_hit_rate:.1f}%  "
+                f"search hits={search_hits:,} misses={search_misses:,} hit_rate={search_hit_rate:.1f}%  "
+                f"new_eval={len(eval_entries):,} new_search={len(search_entries):,}"
             )
-            if not new_entries:
+            if not eval_entries and not search_entries:
                 print("  No new entries to flush.")
                 continue
 
-            def _print_flush_progress(done: int, total: int) -> None:
+            def _print_flush_progress(label: str, done: int, total: int) -> None:
                 width = 28
                 ratio = min(1.0, done / total) if total else 1.0
                 filled = int(width * ratio)
                 bar = "#" * filled + "-" * (width - filled)
                 print(
-                    f"\r  Flushing DB: [{bar}] {done:,}/{total:,} ({ratio*100:5.1f}%)",
+                    f"\r  Flushing {label}: [{bar}] {done:,}/{total:,} ({ratio*100:5.1f}%)",
                     end="",
                     flush=True,
                 )
 
             t_flush = time.time()
-            written = db.save_entries(
-                new_entries,
-                SCORE_BOARD_VERSION,
-                progress_cb=_print_flush_progress,
-            )
+            written_eval = 0
+            written_search = 0
+            if eval_entries:
+                written_eval = db.save_entries(
+                    eval_entries,
+                    SCORE_BOARD_VERSION,
+                    progress_cb=lambda d, t: _print_flush_progress("eval", d, t),
+                )
+                print()
+            if search_entries:
+                written_search = db.save_search_entries(
+                    search_entries,
+                    SCORE_BOARD_VERSION,
+                    SEARCH_CACHE_VERSION,
+                    progress_cb=lambda d, t: _print_flush_progress("search", d, t),
+                )
+                print()
             flush_seconds = time.time() - t_flush
-            total_flush_rows += written
+            total_flush_eval_rows += written_eval
+            total_flush_search_rows += written_search
             total_flush_seconds += flush_seconds
-            print()
             print(
-                f"  Flushed {written:,} new entries to DB in {flush_seconds:.1f}s. "
-                f"(table_size={get_trans_table_size():,})"
+                f"  Flushed eval={written_eval:,} search={written_search:,} rows "
+                f"in {flush_seconds:.1f}s. "
+                f"(eval_cache_size={get_trans_table_size():,}, "
+                f"search_cache_size={get_search_trans_table_size():,})"
             )
-        if total_flush_rows > 0:
+        if total_flush_eval_rows > 0 or total_flush_search_rows > 0:
             print(
-                f"\nDB flush complete: {total_flush_rows:,} rows written in "
+                f"\nDB flush complete: eval={total_flush_eval_rows:,} "
+                f"search={total_flush_search_rows:,} rows written in "
                 f"{total_flush_seconds:.1f}s total."
             )
 

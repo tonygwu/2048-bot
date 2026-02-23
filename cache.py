@@ -1,14 +1,21 @@
 """
-cache.py — SQLite persistence for the score_board transposition table.
+cache.py — SQLite persistence for evaluator/search transposition tables.
 
 Database: cache/transposition.db
-Schema:
+Schemas:
   entries(board_bb INTEGER, undo_uses INTEGER, swap_uses INTEGER,
           delete_uses INTEGER, version TEXT, score REAL,
           PRIMARY KEY (board_bb, undo_uses, swap_uses, delete_uses, version))
 
+  search_entries(board_bb INTEGER, undo_uses INTEGER, swap_uses INTEGER,
+                 delete_uses INTEGER, depth INTEGER, is_max INTEGER,
+                 eval_version TEXT, search_version TEXT, max_exp INTEGER,
+                 score REAL,
+                 PRIMARY KEY (board_bb, undo_uses, swap_uses, delete_uses,
+                              depth, is_max, eval_version, search_version))
+
 board_bb is a 64-bit value that can exceed Python's sqlite3 signed-int limit
-(2^63 − 1) for late-game boards.  We store it as a signed int64 using
+(2^63 − 1) for late-game boards. We store it as a signed int64 using
 _to_signed / _from_signed helpers and reconstruct the unsigned value on read.
 """
 
@@ -69,6 +76,38 @@ _CREATE_VERSION_KEY_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_version_board_power_undo "
     "ON entries(version, board_bb, undo_uses, swap_uses, delete_uses)"
 )
+_CREATE_SEARCH_ENTRIES_SQL = """
+    CREATE TABLE IF NOT EXISTS search_entries (
+        board_bb       INTEGER NOT NULL,
+        undo_uses      INTEGER NOT NULL,
+        swap_uses      INTEGER NOT NULL,
+        delete_uses    INTEGER NOT NULL,
+        depth          INTEGER NOT NULL,
+        is_max         INTEGER NOT NULL,
+        eval_version   TEXT    NOT NULL,
+        search_version TEXT    NOT NULL,
+        max_exp        INTEGER NOT NULL,
+        score          REAL    NOT NULL,
+        PRIMARY KEY (
+            board_bb,
+            undo_uses,
+            swap_uses,
+            delete_uses,
+            depth,
+            is_max,
+            eval_version,
+            search_version
+        )
+    )
+"""
+_CREATE_SEARCH_VERSION_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_search_versions "
+    "ON search_entries(eval_version, search_version)"
+)
+_CREATE_SEARCH_TIER_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_search_versions_tier "
+    "ON search_entries(eval_version, search_version, max_exp, depth, is_max)"
+)
 
 
 # ── Signed-int helpers (SQLite stores INTEGER as signed 64-bit) ───────────────
@@ -121,6 +160,30 @@ def _tile_to_max_exp(tile: int) -> int:
         return 0
     # floor(log2(t)) for non-powers-of-two, exact for powers-of-two.
     return t.bit_length() - 1
+
+
+def _clamp_uses(v: int) -> int:
+    # Game semantics cap each power-up to [0, 2].
+    return max(0, min(2, int(v)))
+
+
+def _clamp_is_max(v: int | bool) -> int:
+    try:
+        return 1 if int(v) != 0 else 0
+    except Exception:
+        return 1 if bool(v) else 0
+
+
+def _normalize_search_key(key) -> tuple[int, int, int, int, int, int]:
+    if isinstance(key, tuple) and len(key) >= 6:
+        bb = int(key[0])
+        uu = _clamp_uses(key[1])
+        su = _clamp_uses(key[2])
+        du = _clamp_uses(key[3])
+        depth = max(0, int(key[4]))
+        is_max = _clamp_is_max(key[5])
+        return bb, uu, su, du, depth, is_max
+    raise ValueError(f"unexpected search cache entry key shape: {key!r}")
 
 
 # ── DB init ───────────────────────────────────────────────────────────────────
@@ -221,6 +284,9 @@ def init_db() -> None:
         _migrate_entries_schema_if_needed(conn)
         conn.execute(_CREATE_VERSION_INDEX_SQL)
         conn.execute(_CREATE_VERSION_KEY_INDEX_SQL)
+        conn.execute(_CREATE_SEARCH_ENTRIES_SQL)
+        conn.execute(_CREATE_SEARCH_VERSION_INDEX_SQL)
+        conn.execute(_CREATE_SEARCH_TIER_INDEX_SQL)
         conn.commit()
     finally:
         conn.close()
@@ -413,10 +479,6 @@ def save_entries(
     if not entries:
         return 0
 
-    def _clamp_uses(v: int) -> int:
-        # Game semantics cap each power-up to [0, 2].
-        return max(0, min(2, int(v)))
-
     init_db()
     conn = _connect_rw()
     try:
@@ -443,6 +505,147 @@ def save_entries(
             conn.executemany(
                 "INSERT OR REPLACE INTO entries "
                 "(board_bb, undo_uses, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?,?)",
+                chunk,
+            )
+            written += len(chunk)
+            if progress_cb is not None:
+                try:
+                    progress_cb(written, total)
+                except Exception:
+                    pass
+        conn.commit()
+    finally:
+        conn.close()
+    return len(rows)
+
+
+def load_search_version(
+    eval_version: str,
+    search_version: str,
+    min_max_tile: int | None = None,
+    max_max_tile: int | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
+    batch_size: int = 200_000,
+    total_rows: int | None = None,
+) -> dict:
+    """Load persisted search transposition entries by (eval, search) versions.
+
+    Optional min/max max-tile filters are inclusive and applied via max exponent.
+    Returns {(board_bb, undo_uses, swap_uses, delete_uses, depth, is_max): score}.
+    """
+    if not os.path.exists(DB_PATH):
+        return {}
+    batch = max(1, int(batch_size))
+    conn = _connect_ro()
+    try:
+        _set_common_pragmas(conn)
+
+        where = ["eval_version = ?", "search_version = ?"]
+        params: list = [eval_version, search_version]
+        if min_max_tile is not None:
+            where.append("max_exp >= ?")
+            params.append(_tile_to_min_exp(min_max_tile))
+        if max_max_tile is not None:
+            where.append("max_exp <= ?")
+            params.append(_tile_to_max_exp(max_max_tile))
+        where_sql = " AND ".join(where)
+
+        try:
+            if total_rows is None:
+                total_rows = conn.execute(
+                    f"SELECT COUNT(*) FROM search_entries WHERE {where_sql}",
+                    tuple(params),
+                ).fetchone()[0]
+            cur = conn.execute(
+                "SELECT board_bb, undo_uses, swap_uses, delete_uses, depth, is_max, score "
+                f"FROM search_entries WHERE {where_sql} "
+                "ORDER BY board_bb, undo_uses, swap_uses, delete_uses, depth, is_max",
+                tuple(params),
+            )
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
+
+        loaded = 0
+        out: dict[tuple[int, int, int, int, int, int], float] = {}
+        while True:
+            rows = cur.fetchmany(batch)
+            if not rows:
+                break
+            for bb, uu, su, du, depth, is_max, score in rows:
+                out[(
+                    _from_signed(int(bb)),
+                    _clamp_uses(uu),
+                    _clamp_uses(su),
+                    _clamp_uses(du),
+                    max(0, int(depth)),
+                    _clamp_is_max(is_max),
+                )] = float(score)
+            loaded += len(rows)
+            if progress_cb is not None:
+                try:
+                    progress_cb(loaded, total_rows)
+                except Exception:
+                    pass
+        if progress_cb is not None and loaded == 0:
+            try:
+                progress_cb(0, total_rows or 0)
+            except Exception:
+                pass
+        return out
+    finally:
+        conn.close()
+
+
+def save_search_entries(
+    entries: dict,
+    eval_version: str,
+    search_version: str,
+    progress_cb: Callable[[int, int], None] | None = None,
+    batch_size: int = 100_000,
+) -> int:
+    """Persist search transposition entries.
+
+    entries: {(board_bb, undo_uses, swap_uses, delete_uses, depth, is_max): score}
+    """
+    if not entries:
+        return 0
+
+    init_db()
+    conn = _connect_rw()
+    try:
+        _set_rw_pragmas(conn)
+        normalized: dict[tuple[int, int, int, int, int, int], float] = {}
+        for key, score in entries.items():
+            bb, uu, su, du, depth, is_max = _normalize_search_key(key)
+            normalized[(bb, uu, su, du, depth, is_max)] = float(score)
+
+        rows = [
+            (
+                _to_signed(bb),
+                uu,
+                su,
+                du,
+                depth,
+                is_max,
+                eval_version,
+                search_version,
+                _max_exp_from_bb_unsigned(bb),
+                score,
+            )
+            for (bb, uu, su, du, depth, is_max), score in normalized.items()
+        ]
+        total = len(rows)
+        step = max(1, int(batch_size))
+        written = 0
+        for i in range(0, total, step):
+            chunk = rows[i:i + step]
+            conn.executemany(
+                "INSERT OR REPLACE INTO search_entries "
+                "(board_bb, undo_uses, swap_uses, delete_uses, depth, is_max, "
+                "eval_version, search_version, max_exp, score) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 chunk,
             )
             written += len(chunk)
@@ -484,6 +687,27 @@ def list_versions() -> dict:
     finally:
         conn.close()
     return {v: cnt for v, cnt in rows}
+
+
+def list_search_versions() -> dict[tuple[str, str], int]:
+    """Return {(eval_version, search_version): row_count} for persisted search rows."""
+    if not os.path.exists(DB_PATH):
+        return {}
+    conn = _connect_ro()
+    try:
+        _set_common_pragmas(conn)
+        try:
+            rows = conn.execute(
+                "SELECT eval_version, search_version, COUNT(*) "
+                "FROM search_entries GROUP BY eval_version, search_version"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" in str(exc).lower():
+                return {}
+            raise
+    finally:
+        conn.close()
+    return {(str(ev), str(sv)): int(cnt) for ev, sv, cnt in rows}
 
 
 def get_all_states(version: str | None = None) -> list[tuple]:

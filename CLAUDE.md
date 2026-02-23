@@ -196,15 +196,16 @@ Use these definitions consistently when comparing strategy changes:
 - Power-up value is dynamic and added on read (`base_score + dynamic_powerup_term`), so power-up counts are not part of the persisted/in-memory eval-cache key.
 - On cap pressure, cache eviction is LRU (no full-table clear); oversized preloads are still preserved.
 - `drain_new_entries()` still returns newly-added keys for SQLite flush after each game.
-- Search has a separate in-memory transposition cache in `strategy_search.py` keyed by `(board_bb, undo_uses, swap_uses, delete_uses, depth, is_max)` for `_expectimax` subtree reuse (not persisted to SQLite).
+- Search has a separate transposition cache in `strategy_search.py` keyed by `(board_bb, undo_uses, swap_uses, delete_uses, depth, is_max)` for `_expectimax` subtree reuse.
+- Search cache rows are persisted in SQLite (`search_entries`) and loaded by version tuple `(SCORE_BOARD_VERSION, SEARCH_CACHE_VERSION)`.
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
 - Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, the preloaded table is preserved and new lookups are not inserted into the in-memory table; they are still tracked for DB flush.
 
 **Tiered runtime preload** (`bot.py`, `cache.py`):
 - Runtime does **not** load the full version upfront. It preloads a startup tier synchronously, then loads higher max-tile tiers in the background.
-- Initial tier preload: boards with max tile `< 1024` (`load_version_by_max_tile_range(..., max_max_tile=512)`).
+- Initial tier preload: boards with max tile `< 1024` for both eval and search caches (`load_version_by_max_tile_range(..., max_max_tile=512)` and `load_search_version(..., max_max_tile=512)`).
 - During play, `TieredCacheLoader.maybe_progress(max_tile)` queues one background tier at a time for `[threshold, threshold*2]` where `threshold` is the current max-tile power-of-two bucket (`>= 1024`).
-- When a tier applies, runtime evicts in-memory entries below that floor via `evict_trans_below_max_tile(threshold)` to keep the table focused on the current stage.
+- When a tier applies, runtime evicts in-memory entries below that floor via `evict_trans_below_max_tile(threshold)` and `evict_search_trans_below_max_tile(threshold)` to keep tables focused on the current stage.
 - If max tile jumps quickly while a load is running, loader keeps the highest pending threshold and may skip intermediate tier loads.
 
 ## Shared Simulation Utilities
@@ -243,15 +244,20 @@ Use these definitions consistently when comparing strategy changes:
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
 - Schema: `entries(board_bb INTEGER, undo_uses INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all five key fields)`.
+- Search schema: `search_entries(board_bb INTEGER, undo_uses INTEGER, swap_uses INTEGER, delete_uses INTEGER, depth INTEGER, is_max INTEGER, eval_version TEXT, search_version TEXT, max_exp INTEGER, score REAL, PK on all key fields)`.
 - `board_bb` is stored as signed int64 (`_to_signed`/`_from_signed` helpers handle values > 2^63).
 - Bot startup/runtime tier loading uses `load_version_by_max_tile_range(...)`; `load_version(version)` is still used by maintenance scripts (for example `populate_cache.py --generate`).
+- Bot startup/runtime search-tier loading uses `load_search_version(eval_version, search_version, ...)`.
 - Runtime/evaluator persistence is canonical board-cache only: rows are read/written with `undo_uses=0, swap_uses=0, delete_uses=0`.
 - `save_entries(entries, version)` writes new rows after each game (insert-or-replace, board-key dedupe).
+- `save_search_entries(entries, eval_version, search_version)` writes search transposition rows after each game.
 - DB path can be overridden with `TRANS_DB_PATH`. If unset, fresh clones auto-bootstrap `cache/transposition.db` as a symlink to `~/Code/transposition.db` when possible.
 
 **Versioning** — **CRITICAL**:
 - `SCORE_BOARD_VERSION` in `strategy_eval.py` (re-exported by `strategy.py`) must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
 - After bumping `SCORE_BOARD_VERSION`, immediately run `.venv/bin/python populate_cache.py --recompute` so the shared DB is refreshed for the latest version.
+- `SEARCH_CACHE_VERSION` in `strategy_search.py` (re-exported by `strategy.py`) must be bumped whenever `_expectimax` semantics/keying logic changes (sampling, penalties, recursion behavior, etc.).
+- Search cache loads are gated by the tuple `(SCORE_BOARD_VERSION, SEARCH_CACHE_VERSION)`.
 - Old version rows remain in the DB but are ignored by runtime loads.
 
 **`populate_cache.py`** — Cache seeding/maintenance:
