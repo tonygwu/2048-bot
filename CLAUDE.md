@@ -152,7 +152,7 @@ Use these definitions consistently when comparing strategy changes:
 
 **`bot.py`** — Async game loop
 
-- `auto_depth(board)` chooses depth from board-state features (max tile, fullness, mobility, roughness), with depth-6 reserved for near-death late-game boards.
+- `auto_depth(board)` chooses depth from board-state features (max tile, fullness, mobility, roughness), with depth-7 reserved for near-death late-game boards.
 - `play_one_game()` handles the full lifecycle: win overlay dismissal (guard flag so DOM element persisting hidden doesn't re-trigger), stuck-board detection (5 unchanged consecutive moves), and power-up tracking.
 - Prints board and status every 25 moves; announces depth bumps in auto mode.
 
@@ -180,13 +180,21 @@ Use these definitions consistently when comparing strategy changes:
 `score_board` results are cached to avoid recomputing the same board position multiple times within and across game runs.
 
 **In-memory cache** (`strategy.py`, `transposition_cache.py`):
-- `TranspositionCache` owns cache policy and stats; `strategy.py` keeps a singleton `_TRANS_CACHE`.
-- Cache key remains `{(board_bb, swap_uses, delete_uses) → score}` with cap `_TRANS_CAP = 500_000`.
+- `TranspositionCache` owns cache policy and stats; `strategy_eval.py` keeps the singleton `_TRANS_CACHE` (re-exported via `strategy.py`).
+- `score_board(board, powers)` caches a board-only **base** score under key `{board_bb → base_score}` with cap `_TRANS_CAP = 500_000`.
+- Power-up value is dynamic and added on read (`base_score + dynamic_powerup_term`), so power-up counts are not part of the persisted/in-memory eval-cache key.
 - On cap pressure, cache eviction is LRU (no full-table clear); oversized preloads are still preserved.
 - `drain_new_entries()` still returns newly-added keys for SQLite flush after each game.
 - Search has a separate in-memory transposition cache in `strategy_search.py` keyed by `(board_bb, swap_uses, delete_uses, depth, is_max)` for `_expectimax` subtree reuse (not persisted to SQLite).
 - `board_to_bb(board)` encodes the 4×4 grid as a 64-bit int (4 bits per cell = log2(tile value), row-major).
 - Oversized preload behavior: if startup preload from SQLite is already above `_TRANS_CAP`, the preloaded table is preserved and new lookups are not inserted into the in-memory table; they are still tracked for DB flush.
+
+**Tiered runtime preload** (`bot.py`, `cache.py`):
+- Runtime does **not** load the full version upfront. It preloads a startup tier synchronously, then loads higher max-tile tiers in the background.
+- Initial tier preload: boards with max tile `< 1024` (`load_version_by_max_tile_range(..., max_max_tile=512)`).
+- During play, `TieredCacheLoader.maybe_progress(max_tile)` queues one background tier at a time for `[threshold, threshold*2]` where `threshold` is the current max-tile power-of-two bucket (`>= 1024`).
+- When a tier applies, runtime evicts in-memory entries below that floor via `evict_trans_below_max_tile(threshold)` to keep the table focused on the current stage.
+- If max tile jumps quickly while a load is running, loader keeps the highest pending threshold and may skip intermediate tier loads.
 
 ## Shared Simulation Utilities
 
@@ -222,14 +230,15 @@ Use these definitions consistently when comparing strategy changes:
   - JSON includes `per_group` and guardrail pass/fail context.
 
 **SQLite persistence** (`cache.py`, `cache/transposition.db`):
-- Schema: `entries(board_bb INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all four)`.
+- Schema: `entries(board_bb INTEGER, undo_uses INTEGER, swap_uses INTEGER, delete_uses INTEGER, version TEXT, score REAL, PK on all five key fields)`.
 - `board_bb` is stored as signed int64 (`_to_signed`/`_from_signed` helpers handle values > 2^63).
-- `load_version(version)` → dict loaded into `_TRANS_TABLE` at bot startup.
-- `save_entries(entries, version)` writes new rows after each game.
+- Bot startup/runtime tier loading uses `load_version_by_max_tile_range(...)`; `load_version(version)` is still used by maintenance scripts (for example `populate_cache.py --generate`).
+- Runtime/evaluator persistence is canonical board-cache only: rows are read/written with `undo_uses=0, swap_uses=0, delete_uses=0`.
+- `save_entries(entries, version)` writes new rows after each game (insert-or-replace, board-key dedupe).
 - DB path can be overridden with `TRANS_DB_PATH`. If unset, fresh clones auto-bootstrap `cache/transposition.db` as a symlink to `~/Code/transposition.db` when possible.
 
 **Versioning** — **CRITICAL**:
-- `SCORE_BOARD_VERSION` in `strategy.py` must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
+- `SCORE_BOARD_VERSION` in `strategy_eval.py` (re-exported by `strategy.py`) must be bumped (e.g. `"1.0"` → `"1.1"`) every time heuristic weights or eval logic changes.
 - After bumping `SCORE_BOARD_VERSION`, immediately run `.venv/bin/python populate_cache.py --recompute` so the shared DB is refreshed for the latest version.
 - Old version rows remain in the DB but are ignored by runtime loads.
 
