@@ -224,6 +224,7 @@ class TieredCacheLoader:
         self._future: Future[dict[str, Any]] | None = None
         self._loading_threshold: int | None = None
         self._queued_threshold: int | None = None
+        self._initial_preload_started = False
         self._active_floor: int = INITIAL_PRELOAD_MIN_TILE  # currently evicted below this max-tile floor
         self._loaded_threshold: int = 0
         self._progress_lock = threading.Lock()
@@ -283,7 +284,12 @@ class TieredCacheLoader:
         )
 
     def _print_tier_eval_progress(self, threshold: int, loaded: int, total: int) -> None:
-        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+        if threshold == INITIAL_PRELOAD_MIN_TILE:
+            label = (
+                f"[cache] loading startup tier "
+                f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,} eval"
+            )
+        elif threshold >= POST_TRIGGER_LOAD_MIN_TILE:
             label = f"[cache] loading tier {POST_TRIGGER_LOAD_MIN_TILE:,}+ eval"
         else:
             label = f"[cache] loading tier {threshold:,} <= max_tile < {threshold * 2:,} eval"
@@ -297,6 +303,11 @@ class TieredCacheLoader:
     def _print_tier_search_progress(self, threshold: int, loaded: int, total: int) -> None:
         if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
             label = f"[cache] loading tier {POST_TRIGGER_LOAD_MIN_TILE:,}+ search"
+        elif threshold == INITIAL_PRELOAD_MIN_TILE:
+            label = (
+                f"[cache] loading startup tier "
+                f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,} search"
+            )
         else:
             label = f"[cache] loading tier {threshold:,} <= max_tile < {threshold * 2:,} search"
         self._print_progress_line(
@@ -306,54 +317,16 @@ class TieredCacheLoader:
             total,
         )
 
-    def initial_load(self) -> int:
-        """Synchronously preload the mid-tier cache range used for early game."""
+    def start_initial_load_async(self) -> None:
+        """Queue startup preload asynchronously and return immediately."""
+        if self._initial_preload_started:
+            return
+        self._initial_preload_started = True
         print(
-            f"Preloading cache tier: "
+            f"Preloading cache tier asynchronously: "
             f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}"
         )
-        t0 = time.perf_counter()
-        eval_entries = db.load_version_by_max_tile_range(
-            self.eval_version,
-            min_max_tile=INITIAL_PRELOAD_MIN_TILE,
-            max_max_tile=INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE - 1,
-            progress_cb=self._print_initial_progress,
-        )
-        self._finish_progress_line("initial-eval")
-        search_entries = db.load_search_version(
-            self.eval_version,
-            self.search_version,
-            min_max_tile=INITIAL_PRELOAD_MIN_TILE,
-            max_max_tile=INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE - 1,
-            progress_cb=self._print_initial_search_progress,
-        )
-        self._finish_progress_line("initial-search")
-        if eval_entries:
-            load_trans_table(eval_entries)
-        if search_entries:
-            load_search_trans_table(search_entries)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        print(
-            f"Loaded eval={len(eval_entries):,} search={len(search_entries):,} "
-            f"cached entries for "
-            f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,} "
-            f"in {elapsed_ms:.0f}ms"
-        )
-        if self.profiler is not None:
-            self.profiler.emit(
-                "cache_tier_initial_load",
-                eval_version=self.eval_version,
-                search_version=self.search_version,
-                max_tile_min=INITIAL_PRELOAD_MIN_TILE,
-                max_tile_max_exclusive=INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE,
-                loaded_eval_rows=len(eval_entries),
-                loaded_search_rows=len(search_entries),
-                elapsed_ms=round(elapsed_ms, 3),
-                trans_table_size=get_trans_table_size(),
-                search_trans_table_size=get_search_trans_table_size(),
-                maxrss_raw=_maxrss_raw(),
-            )
-        return len(eval_entries)
+        self._start_load(INITIAL_PRELOAD_MIN_TILE)
 
     def _normalize_threshold(self, max_tile: int) -> int | None:
         mt = max(0, int(max_tile))
@@ -363,7 +336,12 @@ class TieredCacheLoader:
 
     def _load_tier_range_job(self, threshold: int) -> dict[str, Any]:
         t0 = time.perf_counter()
-        max_tile_inclusive = None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else (threshold * 2) - 1
+        if threshold == INITIAL_PRELOAD_MIN_TILE:
+            max_tile_inclusive = INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE - 1
+        elif threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+            max_tile_inclusive = None
+        else:
+            max_tile_inclusive = (threshold * 2) - 1
         eval_entries = db.load_version_by_max_tile_range(
             self.eval_version,
             min_max_tile=threshold,
@@ -398,7 +376,12 @@ class TieredCacheLoader:
     def _start_load(self, threshold: int) -> None:
         self._loading_threshold = threshold
         self._future = self._executor.submit(self._load_tier_range_job, threshold)
-        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+        if threshold == INITIAL_PRELOAD_MIN_TILE:
+            print(
+                f"\n[cache] queued startup preload for "
+                f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}"
+            )
+        elif threshold >= POST_TRIGGER_LOAD_MIN_TILE:
             print(f"\n[cache] queued background tier load for {POST_TRIGGER_LOAD_MIN_TILE:,}+")
         else:
             print(
@@ -412,7 +395,11 @@ class TieredCacheLoader:
                 search_version=self.search_version,
                 threshold=threshold,
                 max_tile_min=threshold,
-                max_tile_max_exclusive=None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else threshold * 2,
+                max_tile_max_exclusive=(
+                    INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE
+                    if threshold == INITIAL_PRELOAD_MIN_TILE
+                    else (None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else threshold * 2)
+                ),
                 maxrss_raw=_maxrss_raw(),
             )
 
@@ -452,7 +439,13 @@ class TieredCacheLoader:
         search_entries = payload.get("search_entries", {})
         elapsed_ms = float(payload.get("elapsed_ms", 0.0))
         t_apply_start = time.perf_counter()
-        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+        if threshold == INITIAL_PRELOAD_MIN_TILE:
+            print(
+                f"\n[cache] applying startup tier "
+                f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,} "
+                f"to in-memory tables (eval={len(eval_entries):,}, search={len(search_entries):,})"
+            )
+        elif threshold >= POST_TRIGGER_LOAD_MIN_TILE:
             print(
                 f"\n[cache] applying tier {POST_TRIGGER_LOAD_MIN_TILE:,}+ to in-memory tables "
                 f"(eval={len(eval_entries):,}, search={len(search_entries):,})"
@@ -487,7 +480,23 @@ class TieredCacheLoader:
         evict_ms = (time.perf_counter() - t_evict) * 1000.0
         apply_total_ms = (time.perf_counter() - t_apply_start) * 1000.0
 
-        if threshold >= POST_TRIGGER_LOAD_MIN_TILE:
+        if threshold == INITIAL_PRELOAD_MIN_TILE:
+            print(
+                f"\n[cache] applied startup tier "
+                f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}: "
+                f"loaded_eval={len(eval_entries):,} loaded_search={len(search_entries):,} "
+                f"evicted_eval={evicted_eval:,} evicted_search={evicted_search:,} "
+                f"eval_size={get_trans_table_size():,} search_size={get_search_trans_table_size():,} "
+                f"(db_load={elapsed_ms:.0f}ms apply={apply_total_ms:.0f}ms "
+                f"eval_apply={apply_eval_ms:.0f}ms search_apply={apply_search_ms:.0f}ms "
+                f"evict={evict_ms:.0f}ms)"
+            )
+            if len(eval_entries) == 0 and len(search_entries) == 0:
+                print(
+                    f"[cache] no startup cached entries found for "
+                    f"{INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}."
+                )
+        elif threshold >= POST_TRIGGER_LOAD_MIN_TILE:
             print(
                 f"\n[cache] applied tier {POST_TRIGGER_LOAD_MIN_TILE:,}+: "
                 f"loaded_eval={len(eval_entries):,} loaded_search={len(search_entries):,} "
@@ -508,13 +517,16 @@ class TieredCacheLoader:
                 f"evict={evict_ms:.0f}ms)"
             )
         if self.profiler is not None:
-            self.profiler.emit(
-                "cache_tier_applied",
+            payload_common = dict(
                 eval_version=self.eval_version,
                 search_version=self.search_version,
                 threshold=threshold,
                 max_tile_min=threshold,
-                max_tile_max_exclusive=None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else threshold * 2,
+                max_tile_max_exclusive=(
+                    INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE
+                    if threshold == INITIAL_PRELOAD_MIN_TILE
+                    else (None if threshold >= POST_TRIGGER_LOAD_MIN_TILE else threshold * 2)
+                ),
                 loaded_eval_rows=len(eval_entries),
                 loaded_search_rows=len(search_entries),
                 evicted_eval_rows=evicted_eval,
@@ -528,6 +540,10 @@ class TieredCacheLoader:
                 search_trans_table_size=get_search_trans_table_size(),
                 maxrss_raw=_maxrss_raw(),
             )
+            if threshold == INITIAL_PRELOAD_MIN_TILE:
+                self.profiler.emit("cache_tier_initial_load", **payload_common)
+            else:
+                self.profiler.emit("cache_tier_applied", **payload_common)
 
         if self._queued_threshold is not None and self._queued_threshold > self._loaded_threshold:
             next_threshold = self._queued_threshold
@@ -1188,16 +1204,10 @@ async def run_bot(headless: bool, depth_arg, num_games: int, profile_log: str) -
         print(f"Could not read cache version counts from DB: {e}")
 
     try:
-        loaded_initial = cache_loader.initial_load()
-        if loaded_initial == 0 and get_trans_table_size() == 0 and get_search_trans_table_size() == 0:
-            print(
-                f"No cached entries found in initial tier "
-                f"({INITIAL_PRELOAD_MIN_TILE:,} <= max_tile < {INITIAL_PRELOAD_MAX_TILE_EXCLUSIVE:,}) "
-                f"for versions=({SCORE_BOARD_VERSION!r}, {SEARCH_CACHE_VERSION!r})."
-            )
+        cache_loader.start_initial_load_async()
     except Exception as exc:
         print(
-            f"Initial tier preload failed ({type(exc).__name__}): {exc}. "
+            f"Initial tier preload queue failed ({type(exc).__name__}): {exc}. "
             "Continuing without preloaded cache."
         )
 
