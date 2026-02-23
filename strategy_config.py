@@ -6,22 +6,22 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class DepthPolicy:
     min_depth: int = 5
-    max_depth: int = 7
-    soft_max: int = 7
-    # Slight upward bias toward deeper search in open/mid-game.
-    base: float = 1.45
-    w_max: float = 0.25
-    w_full: float = 1.10
-    w_blocked: float = 0.75
-    w_rough: float = 0.45
+    max_depth: int = 6
+    soft_max: int = 6
+    # Keep auto-depth anchored at 5 unless board pressure strongly justifies 6.
+    base: float = 1.10
+    w_max: float = 0.20
+    w_full: float = 0.95
+    w_blocked: float = 0.65
+    w_rough: float = 0.35
     rough_norm_divisor: float = 36.0
     open_empties_threshold: int = 8
-    open_penalty: float = 0.40
+    open_penalty: float = 0.55
     jammed_empties_threshold: int = 2
-    # Offset baseline bump for jammed boards so late-game depth doesn't jump.
-    jammed_bonus: float = 0.50
+    # Keep a bump for jammed boards, but avoid over-escalating to depth 6.
+    jammed_bonus: float = 0.35
     low_valid_bonus_threshold: int = 2
-    low_valid_bonus: float = 0.25
+    low_valid_bonus: float = 0.15
     # In open/mid-game boards, low legal-move count is often temporary noise.
     # Damp the low-valid bonus to avoid over-escalating depth too early.
     midgame_empties_threshold: int = 5
@@ -30,13 +30,13 @@ class DepthPolicy:
     surgery_empties_threshold: int = 3
     surgery_valid_threshold: int = 3
     surgery_rough_threshold: float = 0.9
-    surgery_bonus: float = 0.40
+    surgery_bonus: float = 0.25
     # Extra nudge for tight boards that usually need longer tactical search.
     tight_empties_threshold: int = 4
     tight_valid_threshold: int = 3
-    tight_bonus: float = 0.50
+    tight_bonus: float = 0.30
     near_death_empties_threshold: int = 1
-    # Depth-7 is now the hard ceiling; keep it reserved for true crises.
+    # Depth-6 is the hard ceiling; reserve it for true near-death crises.
     near_death_valid_threshold: int = 2
     near_death_rough_threshold: float = 0.95
     near_death_max_log_threshold: float = 11.0
