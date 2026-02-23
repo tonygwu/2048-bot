@@ -21,6 +21,7 @@ _to_signed / _from_signed helpers and reconstruct the unsigned value on read.
 
 import os
 import sqlite3
+import time
 from collections.abc import Callable
 
 _DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "cache", "transposition.db")
@@ -58,6 +59,9 @@ DB_PATH = _resolve_db_path()
 
 _SQLITE_TIMEOUT_S = 30.0
 _SQLITE_BUSY_TIMEOUT_MS = 30_000
+_SQLITE_LOCK_RETRY_ATTEMPTS = 12
+_SQLITE_LOCK_RETRY_BASE_S = 0.05
+_SQLITE_LOCK_RETRY_MAX_S = 1.0
 _SCHEMA_READY = False
 
 _CREATE_ENTRIES_SQL = """
@@ -502,18 +506,39 @@ def save_entries(
         written = 0
         for i in range(0, total, step):
             chunk = rows[i:i + step]
-            conn.executemany(
-                "INSERT OR REPLACE INTO entries "
-                "(board_bb, undo_uses, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?,?)",
-                chunk,
-            )
+            for attempt in range(_SQLITE_LOCK_RETRY_ATTEMPTS):
+                try:
+                    # Keep each chunk in its own short transaction so
+                    # concurrent writer processes can interleave progress.
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO entries "
+                        "(board_bb, undo_uses, swap_uses, delete_uses, version, score) VALUES (?,?,?,?,?,?)",
+                        chunk,
+                    )
+                    conn.commit()
+                    break
+                except sqlite3.OperationalError as exc:
+                    msg = str(exc).lower()
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                    if "locked" not in msg and "busy" not in msg:
+                        raise
+                    if attempt >= _SQLITE_LOCK_RETRY_ATTEMPTS - 1:
+                        raise
+                    sleep_s = min(
+                        _SQLITE_LOCK_RETRY_MAX_S,
+                        _SQLITE_LOCK_RETRY_BASE_S * (2 ** attempt),
+                    )
+                    time.sleep(sleep_s)
             written += len(chunk)
             if progress_cb is not None:
                 try:
                     progress_cb(written, total)
                 except Exception:
                     pass
-        conn.commit()
     finally:
         conn.close()
     return len(rows)
